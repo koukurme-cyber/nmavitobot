@@ -13,13 +13,11 @@ from zoneinfo import ZoneInfo
 
 from avito_provider import get_status
 
-# BotHost/Docker может буферизовать stdout. Делаем логи видимыми сразу.
 try:
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
 except Exception:
     pass
-
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -74,9 +72,16 @@ def seller_block(seller):
 
     rows.append(f"Кошелёк: <b>{html.escape(money(seller.get('wallet')))}</b>")
 
-    if seller.get("advance") is not None:
-        rows.append(f"Аванс: <b>{html.escape(money(seller.get('advance')))}</b>")
+    if seller.get("financial_mode") == "placements":
+        if seller.get("placements_remaining") is not None:
+            rows.append(
+                f"Остаток размещений: <b>{html.escape(str(seller['placements_remaining']))}</b>"
+            )
+    else:
+        if seller.get("advance") is not None:
+            rows.append(f"Аванс: <b>{html.escape(money(seller.get('advance')))}</b>")
 
+    stats = seller.get("ads", {})
     labels = [
         ("published", "Опубликовано"),
         ("rejected", "Отклонено"),
@@ -84,25 +89,29 @@ def seller_block(seller):
         ("removed", "Снято"),
         ("old", "Завершено"),
     ]
-
-    stats = seller.get("ads", {})
     for key, label in labels:
         if key in stats:
             rows.append(f"{label}: <b>{html.escape(str(stats[key]))}</b>")
 
-    payment = seller.get("next_payment")
-    if payment:
-        date = payment.get("date") or "—"
-        amount = money(payment.get("amount"))
+    if seller.get("tariff_end"):
         rows.append(
-            f"Ближайший платёж: <b>{html.escape(str(date))} — {html.escape(amount)}</b>"
+            f"Тариф до: <b>{html.escape(str(seller['tariff_end']))}</b>"
         )
 
+    next_tariff = seller.get("next_tariff")
+    if next_tariff:
+        date = next_tariff.get("date")
+        amount = next_tariff.get("amount")
+        if date and amount is not None:
+            rows.append(
+                f"Следующий тариф: <b>{html.escape(str(date))} — {html.escape(money(amount))}</b>"
+            )
+        elif date:
+            rows.append(f"Следующий тариф с: <b>{html.escape(str(date))}</b>")
+
     warnings = seller.get("warnings") or []
-    if warnings:
-        # Не засоряем сообщение телом ответа API.
-        if any("429" in warning for warning in warnings):
-            rows.append("<i>Часть данных временно недоступна: лимит Avito</i>")
+    if warnings and any("429" in warning for warning in warnings):
+        rows.append("<i>Часть данных временно недоступна: лимит Avito</i>")
 
     return "\n".join(rows)
 
@@ -139,10 +148,7 @@ def load_cached_status():
 
 def save_cached_status(data, fetched_at):
     tmp_path = CACHE_PATH.with_suffix(".tmp")
-    payload = {
-        "data": data,
-        "fetched_at": fetched_at,
-    }
+    payload = {"data": data, "fetched_at": fetched_at}
     try:
         with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
@@ -152,7 +158,6 @@ def save_cached_status(data, fetched_at):
 
 
 def refresh_status_message(chat_id, message_id):
-    # Не запускаем второй тяжёлый обход, пока первый ещё идёт.
     if not _refresh_lock.acquire(blocking=False):
         return
 
@@ -170,28 +175,16 @@ def refresh_status_message(chat_id, message_id):
                     "message_id": message_id,
                     "text": render_status(data, fetched_at),
                     "parse_mode": "HTML",
-                    "reply_markup": keyboard(),
                     "disable_web_page_preview": "true",
                 },
             )
         except Exception as exc:
-            # Сообщение могло быть удалено пользователем или уже истечь.
             if "message is not modified" not in str(exc).lower():
                 print("BACKGROUND EDIT ERROR:", exc, flush=True)
     except Exception as exc:
         print("BACKGROUND REFRESH ERROR:", exc, flush=True)
     finally:
         _refresh_lock.release()
-
-def keyboard():
-    return json.dumps(
-        {
-            "inline_keyboard": [
-                [{"text": "Обновить", "callback_data": "refresh"}]
-            ]
-        },
-        ensure_ascii=False,
-    )
 
 
 def delete_message_later(chat_id, message_id, delay=600):
@@ -222,10 +215,7 @@ def send_status(chat_id):
     cached = load_cached_status()
 
     if cached:
-        text = render_status(
-            cached["data"],
-            cached.get("fetched_at"),
-        )
+        text = render_status(cached["data"], cached.get("fetched_at"))
     else:
         text = "<b>Авито</b>\n\nПолучаю актуальные данные…"
 
@@ -235,83 +225,29 @@ def send_status(chat_id):
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "HTML",
-            "reply_markup": keyboard(),
             "disable_web_page_preview": "true",
         },
     )
 
-    delete_message_later(
-        chat_id,
-        message["message_id"],
-        delay=600,
-    )
+    delete_message_later(chat_id, message["message_id"], delay=600)
+    start_background_refresh(chat_id, message["message_id"])
 
-    # Сразу возвращаем управление Telegram, а Avito обновляем отдельно.
-    start_background_refresh(
-        chat_id,
-        message["message_id"],
-    )
-
-
-def edit_status(chat_id, message_id):
-    cached = load_cached_status()
-
-    if cached:
-        try:
-            telegram_api(
-                "editMessageText",
-                {
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "text": render_status(
-                        cached["data"],
-                        cached.get("fetched_at"),
-                    ),
-                    "parse_mode": "HTML",
-                    "reply_markup": keyboard(),
-                    "disable_web_page_preview": "true",
-                },
-            )
-        except Exception as exc:
-            if "message is not modified" not in str(exc).lower():
-                raise
-
-    start_background_refresh(
-        chat_id,
-        message_id,
-    )
 
 def handle_update(update):
     message = update.get("message")
-    if message:
-        text = (message.get("text") or "").strip()
-        chat_id = message["chat"]["id"]
-
-        if text.startswith("/start") or text.startswith("/status"):
-            send_status(chat_id)
-
+    if not message:
         return
 
-    callback = update.get("callback_query")
-    if callback:
-        telegram_api(
-            "answerCallbackQuery",
-            {"callback_query_id": callback["id"]},
-        )
+    text = (message.get("text") or "").strip()
+    chat_id = message["chat"]["id"]
 
-        if callback.get("data") == "refresh" and callback.get("message"):
-            message = callback["message"]
-            edit_status(
-                message["chat"]["id"],
-                message["message_id"],
-            )
+    if text.startswith("/start") or text.startswith("/status"):
+        send_status(chat_id)
 
 
 def main():
     print("Bot started", flush=True)
 
-    # Этот бот работает через long polling.
-    # Если ранее для токена был установлен webhook, убираем его.
     try:
         telegram_api("deleteWebhook", {"drop_pending_updates": "false"})
     except Exception as exc:
@@ -339,11 +275,8 @@ def main():
         try:
             params = {
                 "timeout": 50,
-                "allowed_updates": json.dumps(
-                    ["message", "callback_query"]
-                ),
+                "allowed_updates": json.dumps(["message"]),
             }
-
             if offset is not None:
                 params["offset"] = offset
 

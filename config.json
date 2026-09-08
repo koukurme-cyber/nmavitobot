@@ -4,12 +4,32 @@
     {
       "key": "aggregaty",
       "name": "Агрегаты",
-      "env_prefix": "AVITO_AGGREGATY"
+      "env_prefix": "AVITO_AGGREGATY",
+      "financial_mode": "advance"
     },
     {
       "key": "avmex",
       "name": "Авмекс",
-      "env_prefix": "AVITO_AVMEX"
+      "env_prefix": "AVITO_AVMEX",
+      "financial_mode": "advance"
+    },
+    {
+      "key": "nm_orange",
+      "name": "Надёжные Машины (оранжевые)",
+      "env_prefix": "AVITO_NM_ORANGE",
+      "financial_mode": "placements"
+    },
+    {
+      "key": "nm_blue",
+      "name": "Надёжные машины (синие)",
+      "env_prefix": "AVITO_NM_BLUE",
+      "financial_mode": "placements"
+    },
+    {
+      "key": "tir",
+      "name": "ТИР",
+      "env_prefix": "AVITO_TIR",
+      "financial_mode": "advance"
     }
   ]
 }
