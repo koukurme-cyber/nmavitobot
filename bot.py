@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from avito_provider import get_financial_status, enrich_status_with_items
+from avito_provider import get_status
 
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -27,7 +27,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 _refresh_lock = threading.Lock()
 _keyboard_cleared_chats = set()
-APP_VERSION = "v24"
+APP_VERSION = "v25"
 
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -203,40 +203,37 @@ def _edit_status_message(chat_id, message_id, data, fetched_at):
 
 
 def refresh_status_message(chat_id, message_id):
-    if not _refresh_lock.acquire(blocking=False):
-        return
+    # Если одновременно пришёл второй /status, он дождётся текущего сбора,
+    # а не останется навсегда с сообщением «Получаю данные…».
+    with _refresh_lock:
+        try:
+            tz_name = CONFIG.get("timezone", "Europe/Moscow")
 
-    try:
-        tz_name = CONFIG.get("timezone", "Europe/Moscow")
+            # Пользователю ничего частичного не показываем: сначала полностью
+            # собираем финансы, тарифы, подписки и объявления по всем аккаунтам.
+            data = get_status(CONFIG)
+            fetched_at = datetime.now(ZoneInfo(tz_name)).strftime("%d.%m.%Y %H:%M")
+            save_cached_status(data, fetched_at)
 
-        # Этап 1: быстро обновляем деньги и тарифы по всем аккаунтам.
-        data = get_financial_status(CONFIG)
-        fetched_at = datetime.now(ZoneInfo(tz_name)).strftime("%d.%m.%Y %H:%M")
-        save_cached_status(data, fetched_at)
-        financial_edit_ok = _edit_status_message(
-            chat_id, message_id, data, fetched_at
-        )
-        if financial_edit_ok:
-            print("Telegram updated after financial phase", flush=True)
+            if _edit_status_message(chat_id, message_id, data, fetched_at):
+                print("Telegram updated with complete status", flush=True)
 
-        # Этап 2: медленно пересчитываем объявления и обновляем то же сообщение ещё раз.
-        data = enrich_status_with_items(data, CONFIG)
-        fetched_at = datetime.now(ZoneInfo(tz_name)).strftime("%d.%m.%Y %H:%M")
-        save_cached_status(data, fetched_at)
-
-        if financial_edit_ok:
-            ads_edit_ok = _edit_status_message(
-                chat_id, message_id, data, fetched_at
-            )
-            if ads_edit_ok:
-                print("Telegram updated after ads phase", flush=True)
-
-    except Exception as exc:
-        print("BACKGROUND REFRESH ERROR:", exc, flush=True)
-    finally:
-        # Удаляем итоговый статус через 10 минут после завершения обновления.
-        delete_message_later(chat_id, message_id, delay=600)
-        _refresh_lock.release()
+        except Exception as exc:
+            print("BACKGROUND REFRESH ERROR:", exc, flush=True)
+            try:
+                telegram_api(
+                    "editMessageText",
+                    {
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "text": "<b>Авито</b>\n\nНе удалось получить актуальные данные.",
+                        "parse_mode": "HTML",
+                    },
+                )
+            except Exception as edit_exc:
+                print("ERROR EDIT ERROR:", edit_exc, flush=True)
+        finally:
+            delete_message_later(chat_id, message_id, delay=600)
 
 
 def delete_message_later(chat_id, message_id, delay=600):
@@ -287,18 +284,14 @@ def remove_legacy_keyboard(chat_id):
 
 def send_status(chat_id):
     remove_legacy_keyboard(chat_id)
-    cached = load_cached_status()
 
-    if cached:
-        text = render_status(cached["data"], cached.get("fetched_at"))
-    else:
-        text = "<b>Авито</b>\n\nПолучаю актуальные данные…"
-
+    # Старый полный кэш сохраняем только как служебный резерв, но не показываем
+    # перед новым сбором: результат появляется один раз и только когда готов целиком.
     message = telegram_api(
         "sendMessage",
         {
             "chat_id": chat_id,
-            "text": text,
+            "text": "<b>Авито</b>\n\nПолучаю актуальные данные…",
             "parse_mode": "HTML",
             "disable_web_page_preview": "true",
         },
