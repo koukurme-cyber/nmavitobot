@@ -11,6 +11,7 @@ BASE_URL = "https://api.avito.ru"
 
 _token_cache = {}
 _advance_cache = {}
+_items_cache = {}
 
 
 def env(name):
@@ -27,7 +28,7 @@ def request_json(
     data=None,
     headers=None,
     timeout=25,
-    max_retries=4,
+    max_retries=5,
 ):
     request_headers = {"Accept": "application/json"}
 
@@ -70,8 +71,10 @@ def request_json(
                     wait_seconds = 0
 
                 if wait_seconds <= 0:
-                    # Мягкий backoff: 2, 4, 6, 8 секунды.
-                    wait_seconds = 2 * (attempt + 1)
+                    # Более осторожный backoff для Avito:
+                    # 5, 10, 20, 30, 45 секунд.
+                    schedule = [5, 10, 20, 30, 45]
+                    wait_seconds = schedule[min(attempt, len(schedule) - 1)]
 
                 print(
                     f"Avito 429 for {path}; retry in {wait_seconds:.1f}s "
@@ -163,7 +166,16 @@ def get_advance(account_key, token):
     return value
 
 
-def get_items_counts(token):
+def get_items_counts(account_key, token):
+    # Статусы объявлений меняются не каждую секунду.
+    # Кэшируем на 10 минут, чтобы /start и кнопка "Обновить"
+    # не пересчитывали тысячи объявлений заново.
+    now = time.time()
+    cached = _items_cache.get(account_key)
+
+    if cached and cached["expires_at"] > now:
+        return cached["value"]
+
     statuses = ["active", "removed", "old", "blocked", "rejected"]
     counts = {status: 0 for status in statuses}
 
@@ -195,17 +207,20 @@ def get_items_counts(token):
         if len(items) < per_page:
             break
 
-        # Не штурмуем API страницами подряд: у крупных аккаунтов это
-        # быстро приводит к 429.
-        time.sleep(0.35)
+        # Намного осторожнее: максимум примерно 1 страница в 1.5 сек.
+        time.sleep(1.5)
 
         page += 1
 
         if page > 1000:
             raise RuntimeError("Слишком много страниц объявлений")
 
-    return counts
+    _items_cache[account_key] = {
+        "value": counts,
+        "expires_at": now + 600,
+    }
 
+    return counts
 
 def get_next_tariff_payment(token, timezone_name):
     try:
@@ -261,32 +276,55 @@ def get_seller_status(seller, timezone_name):
     if not user_id:
         raise RuntimeError("Avito не вернул ID профиля")
 
-    counts = get_items_counts(token)
-
-    return {
+    result = {
         "key": key,
         "name": seller["name"],
-        "wallet": get_wallet(token, user_id),
-        "advance": get_advance(key, token),
-        "ads": {
+        "wallet": None,
+        "advance": None,
+        "ads": {},
+        "next_payment": None,
+        "warnings": [],
+    }
+
+    # Баланс не должен пропадать только потому, что Avito ограничил
+    # запросы к списку объявлений.
+    try:
+        result["wallet"] = get_wallet(token, user_id)
+    except Exception as exc:
+        result["warnings"].append(f"кошелёк: {exc}")
+
+    try:
+        result["advance"] = get_advance(key, token)
+    except Exception as exc:
+        result["warnings"].append(f"аванс: {exc}")
+
+    try:
+        counts = get_items_counts(key, token)
+        result["ads"] = {
             "published": counts["active"],
             "rejected": counts["rejected"],
             "blocked": counts["blocked"],
             "removed": counts["removed"],
             "old": counts["old"],
-        },
-        "next_payment": get_next_tariff_payment(
+        }
+    except Exception as exc:
+        result["warnings"].append(f"объявления: {exc}")
+
+    try:
+        result["next_payment"] = get_next_tariff_payment(
             token,
             timezone_name,
-        ),
-    }
+        )
+    except Exception as exc:
+        result["warnings"].append(f"тариф: {exc}")
 
+    return result
 
 def get_status(config):
     timezone_name = config.get("timezone", "Europe/Moscow")
     sellers = []
 
-    for seller in config["sellers"]:
+    for index, seller in enumerate(config["sellers"]):
         try:
             sellers.append(
                 get_seller_status(
@@ -302,5 +340,9 @@ def get_status(config):
                     "error": str(exc),
                 }
             )
+
+        # Не начинаем второй аккаунт сразу вслед за первым.
+        if index < len(config["sellers"]) - 1:
+            time.sleep(1.5)
 
     return {"sellers": sellers}

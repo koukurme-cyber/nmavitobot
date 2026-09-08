@@ -78,6 +78,12 @@ def seller_block(seller):
             f"Ближайший платёж: <b>{html.escape(str(date))} — {html.escape(amount)}</b>"
         )
 
+    warnings = seller.get("warnings") or []
+    if warnings:
+        # Не засоряем сообщение телом ответа API.
+        if any("429" in warning for warning in warnings):
+            rows.append("<i>Часть данных временно недоступна: лимит Avito</i>")
+
     return "\n".join(rows)
 
 
