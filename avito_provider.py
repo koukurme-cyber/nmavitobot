@@ -153,8 +153,14 @@ def get_advance(account_key, token):
             data.get("error") if isinstance(data, dict) else None
         )
 
+        raw_balance = payload.get("balance")
+        raw_debt = payload.get("debt")
+
         print(
-            f"CPA v2 {account_key}: advance={raw_advance!r}, "
+            f"CPA v2 {account_key}: "
+            f"balance={raw_balance!r}, "
+            f"debt={raw_debt!r}, "
+            f"advance={raw_advance!r}, "
             f"error={api_error!r}, "
             f"top_keys={list(data.keys()) if isinstance(data, dict) else []}, "
             f"payload_keys={list(payload.keys())}",
