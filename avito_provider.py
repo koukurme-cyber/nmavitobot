@@ -167,16 +167,20 @@ def get_advance(account_key, token):
             flush=True,
         )
 
-        if api_error and raw_advance is None:
+        if api_error and raw_balance is None:
             raise RuntimeError(f"Avito CPA error: {api_error}")
 
+        # В интерфейсе Avito Pro показатель "Аванс" соответствует
+        # полю balance из /cpa/v2/balanceInfo, а не полю advance.
+        # API отдаёт сумму в копейках; кабинет показывает целые рубли
+        # без округления вверх.
         value = None
-        if raw_advance is not None:
+        if raw_balance is not None:
             try:
-                value = float(raw_advance) / 100.0
+                value = int(float(raw_balance)) // 100
             except (TypeError, ValueError):
                 print(
-                    f"CPA v2 {account_key}: unexpected advance value {raw_advance!r}",
+                    f"CPA v2 {account_key}: unexpected balance value {raw_balance!r}",
                     flush=True,
                 )
 
