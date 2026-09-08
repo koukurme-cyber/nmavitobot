@@ -433,6 +433,62 @@ def get_subscription_operations(account_key, token, timezone_name):
     return found
 
 
+def get_subscription_details(seller, token, timezone_name):
+    """
+    Рассчитывает окончание текущего периода подписки по последней операции
+    подписки в истории и длительности периода из config.json.
+    """
+    key = seller["key"]
+    period_days = int(seller.get("subscription_period_days") or 30)
+    operations = get_subscription_operations(key, token, timezone_name)
+
+    if not operations:
+        return {
+            "subscription_end": None,
+            "subscription_next_payment": None,
+        }
+
+    latest = operations[0]
+    raw_dt = latest.get("paidAt") or latest.get("updatedAt")
+    if not raw_dt:
+        return {
+            "subscription_end": None,
+            "subscription_next_payment": None,
+        }
+
+    try:
+        start_dt = datetime.fromisoformat(str(raw_dt).replace("Z", "+00:00"))
+    except ValueError:
+        return {
+            "subscription_end": None,
+            "subscription_next_payment": None,
+        }
+
+    end_dt = start_dt + timedelta(days=period_days)
+    end_date = end_dt.astimezone(ZoneInfo(timezone_name)).strftime("%d.%m.%Y")
+
+    amount = latest.get("amountRub")
+    next_payment = {
+        "date": end_date,
+        "amount": amount,
+    }
+
+    print(
+        f"Subscription details {key}: "
+        f"start={start_dt.isoformat()!r}, "
+        f"period_days={period_days}, "
+        f"end={end_date!r}, "
+        f"amount={amount!r}, "
+        f"operation={latest.get('operationName')!r}",
+        flush=True,
+    )
+
+    return {
+        "subscription_end": end_date,
+        "subscription_next_payment": next_payment,
+    }
+
+
 def get_seller_finances(seller, timezone_name):
     key = seller["key"]
     prefix = seller["env_prefix"]
@@ -453,6 +509,8 @@ def get_seller_finances(seller, timezone_name):
         "name": seller["name"],
         "financial_mode": financial_mode,
         "subscription_name": seller.get("subscription_name"),
+        "subscription_end": None,
+        "subscription_next_payment": None,
         "wallet": None,
         "advance": None,
         "placements_remaining": None,
@@ -475,10 +533,14 @@ def get_seller_finances(seller, timezone_name):
             result["warnings"].append(f"аванс: {exc}")
 
         try:
-            get_subscription_operations(key, token, timezone_name)
+            subscription = get_subscription_details(seller, token, timezone_name)
+            result["subscription_end"] = subscription.get("subscription_end")
+            result["subscription_next_payment"] = subscription.get(
+                "subscription_next_payment"
+            )
         except Exception as exc:
             print(
-                f"Subscription diagnostic failed for {key}: {exc}",
+                f"Subscription details failed for {key}: {exc}",
                 flush=True,
             )
 
@@ -540,6 +602,8 @@ def get_financial_status(config):
                     "name": seller["name"],
                     "financial_mode": seller.get("financial_mode", "advance"),
                     "subscription_name": seller.get("subscription_name"),
+                    "subscription_end": None,
+                    "subscription_next_payment": None,
                     "wallet": None,
                     "advance": None,
                     "placements_remaining": None,

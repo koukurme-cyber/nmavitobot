@@ -6,14 +6,16 @@
       "name": "Агрегаты",
       "env_prefix": "AVITO_AGGREGATY",
       "financial_mode": "advance",
-      "subscription_name": "Максимальная"
+      "subscription_name": "Максимальная",
+      "subscription_period_days": 30
     },
     {
       "key": "avmex",
       "name": "Авмекс",
       "env_prefix": "AVITO_AVMEX",
       "financial_mode": "advance",
-      "subscription_name": "Расширенная"
+      "subscription_name": "Расширенная",
+      "subscription_period_days": 30
     },
     {
       "key": "nm_orange",
@@ -32,7 +34,8 @@
       "name": "ТИР",
       "env_prefix": "AVITO_TIR",
       "financial_mode": "advance",
-      "subscription_name": "Расширенная"
+      "subscription_name": "Расширенная",
+      "subscription_period_days": 30
     }
   ]
 }
