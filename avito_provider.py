@@ -138,8 +138,7 @@ def get_advance(account_key, token):
     now = time.time()
     cached = _advance_cache.get(account_key)
 
-    # CPA v2 имеет жёсткий лимит около 1 запроса в минуту.
-    # Поэтому используем кэш минимум 65 секунд.
+    # CPA v2: максимум 1 запрос в минуту.
     if cached and cached["expires_at"] > now:
         return cached["value"]
 
@@ -152,11 +151,32 @@ def get_advance(account_key, token):
             headers={"X-Source": "avito-telegram-status-bot"},
         )
 
-        amount = data.get("advance")
-        if isinstance(amount, (int, float)):
-            value = amount / 100.0
-        else:
-            value = None
+        # У этого deprecated endpoint возможен HTTP 200 даже с полем error.
+        api_error = data.get("error")
+        raw_advance = data.get("advance")
+
+        print(
+            f"CPA v2 {account_key}: "
+            f"advance={raw_advance!r}, "
+            f"error={api_error!r}, "
+            f"keys={list(data.keys())}",
+            flush=True,
+        )
+
+        if api_error and raw_advance is None:
+            raise RuntimeError(f"Avito CPA error: {api_error}")
+
+        value = None
+        if raw_advance is not None:
+            try:
+                # На случай, если API отдаст число строкой.
+                value = float(raw_advance) / 100.0
+            except (TypeError, ValueError):
+                print(
+                    f"CPA v2 {account_key}: unexpected advance value "
+                    f"{raw_advance!r}",
+                    flush=True,
+                )
 
         _advance_cache[account_key] = {
             "value": value,
@@ -167,8 +187,7 @@ def get_advance(account_key, token):
     except Exception as exc:
         print(f"CPA advance unavailable for {account_key}: {exc}", flush=True)
 
-        # Если раньше уже было успешное значение, не теряем его из-за
-        # временного лимита/API-сбоя.
+        # Не теряем последнее успешное значение при временной ошибке.
         if cached and "value" in cached:
             _advance_cache[account_key] = {
                 "value": cached["value"],

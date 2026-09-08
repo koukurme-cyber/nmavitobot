@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -36,8 +37,12 @@ def telegram_api(method, data=None):
     body = urllib.parse.urlencode(data or {}).encode("utf-8")
     request = urllib.request.Request(f"{API}/{method}", data=body)
 
-    with urllib.request.urlopen(request, timeout=70) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=70) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Telegram API {exc.code}: {raw[:500]}") from exc
 
     if not payload.get("ok"):
         raise RuntimeError(payload)
@@ -201,6 +206,30 @@ def handle_update(update):
 
 def main():
     print("Bot started", flush=True)
+
+    # Этот бот работает через long polling.
+    # Если ранее для токена был установлен webhook, убираем его.
+    try:
+        telegram_api("deleteWebhook", {"drop_pending_updates": "false"})
+    except Exception as exc:
+        print("Webhook cleanup warning:", exc, flush=True)
+
+    try:
+        telegram_api(
+            "setMyCommands",
+            {
+                "commands": json.dumps(
+                    [
+                        {"command": "start", "description": "Показать статус Avito"},
+                        {"command": "status", "description": "Показать статус Avito"},
+                    ],
+                    ensure_ascii=False,
+                )
+            },
+        )
+    except Exception as exc:
+        print("Command setup warning:", exc, flush=True)
+
     offset = None
 
     while True:
