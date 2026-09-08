@@ -27,7 +27,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 _refresh_lock = threading.Lock()
 _keyboard_cleared_chats = set()
-APP_VERSION = "v29"
+APP_VERSION = "v30"
 
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -177,6 +177,43 @@ def _updated_line(fetched_at=None):
 
 
 
+
+def _regular_payment_line(payment):
+    if not isinstance(payment, dict) or not payment:
+        return None
+
+    date = payment.get("date")
+    amount = payment.get("amount")
+
+    parts = []
+    if date:
+        parts.append(html.escape(str(date)))
+    if amount is not None:
+        if parts:
+            parts.append("—")
+        parts.append(money(amount))
+
+    if not parts:
+        return None
+
+    text = "Регулярный платёж: " + " ".join(parts)
+
+    # Telegram Bot API не поддерживает цвет текста в HTML.
+    # Поэтому для близкой даты используем красный маркер + жирный текст.
+    if date:
+        try:
+            due = datetime.strptime(str(date), "%d.%m.%Y").date()
+            tz_name = CONFIG.get("timezone", "Europe/Moscow")
+            today = datetime.now(ZoneInfo(tz_name)).date()
+            days_left = (due - today).days
+            if days_left <= 3:
+                return f"🔴 <b>{text}</b>"
+        except Exception:
+            pass
+
+    return text
+
+
 def _seller_full_block(seller):
     name = html.escape(seller.get("name") or _seller_short_name(seller))
 
@@ -204,21 +241,11 @@ def _seller_full_block(seller):
         f"Завершено: {plain_number(stats.get('old'))}",
     ])
 
-    end_date = seller.get("subscription_end") or seller.get("tariff_end")
-    if end_date:
-        label = "Тариф до" if seller.get("financial_mode") == "placements" else "Подписка до"
-        lines.append(f"{label}: {html.escape(str(end_date))}")
 
     payment = seller.get("subscription_next_payment") or seller.get("next_tariff")
-    if isinstance(payment, dict) and payment:
-        date = payment.get("date")
-        amount = payment.get("amount")
-        if date and amount is not None:
-            lines.append(f"Следующий платёж: {html.escape(str(date))} — {money(amount)}")
-        elif date:
-            lines.append(f"Следующий платёж: {html.escape(str(date))}")
-        elif amount is not None:
-            lines.append(f"Следующий платёж: {money(amount)}")
+    payment_line = _regular_payment_line(payment)
+    if payment_line:
+        lines.append(payment_line)
 
     return "\n".join(lines)
 
@@ -242,21 +269,11 @@ def _seller_balance_block(seller):
     elif seller.get("advance") is not None:
         lines.append(f"Аванс: {money(seller.get('advance'))}")
 
-    end_date = seller.get("subscription_end") or seller.get("tariff_end")
-    if end_date:
-        label = "Тариф до" if seller.get("financial_mode") == "placements" else "Подписка до"
-        lines.append(f"{label}: {html.escape(str(end_date))}")
 
     payment = seller.get("subscription_next_payment") or seller.get("next_tariff")
-    if isinstance(payment, dict) and payment:
-        date = payment.get("date")
-        amount = payment.get("amount")
-        if date and amount is not None:
-            lines.append(f"Следующий платёж: {html.escape(str(date))} — {money(amount)}")
-        elif date:
-            lines.append(f"Следующий платёж: {html.escape(str(date))}")
-        elif amount is not None:
-            lines.append(f"Следующий платёж: {money(amount)}")
+    payment_line = _regular_payment_line(payment)
+    if payment_line:
+        lines.append(payment_line)
 
     return "\n".join(lines)
 
