@@ -26,7 +26,7 @@ CACHE_PATH = DATA_DIR / "status_cache.json"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 _refresh_lock = threading.Lock()
-APP_VERSION = "v18"
+APP_VERSION = "v20"
 
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -82,25 +82,6 @@ def seller_block(seller):
         if seller.get("advance") is not None:
             rows.append(f"Аванс: <b>{html.escape(money(seller.get('advance')))}</b>")
 
-        if seller.get("subscription_end"):
-            rows.append(
-                f"Подписка до: <b>{html.escape(str(seller['subscription_end']))}</b>"
-            )
-
-        subscription_payment = seller.get("subscription_next_payment")
-        if subscription_payment:
-            date = subscription_payment.get("date")
-            amount = subscription_payment.get("amount")
-            if date and amount is not None:
-                rows.append(
-                    f"Следующий платёж: <b>{html.escape(str(date))} — "
-                    f"{html.escape(money(amount))}</b>"
-                )
-            elif date:
-                rows.append(
-                    f"Следующий платёж: <b>{html.escape(str(date))}</b>"
-                )
-
     stats = seller.get("ads", {})
     if seller.get("ads_pending"):
         rows.append("<i>Объявления обновляются…</i>")
@@ -131,6 +112,26 @@ def seller_block(seller):
             )
         elif date:
             rows.append(f"Следующий платёж: <b>{html.escape(str(date))}</b>")
+
+    # Строки CPA-подписки всегда идут в самом конце блока аккаунта.
+    if seller.get("subscription_end"):
+        rows.append(
+            f"Подписка до: <b>{html.escape(str(seller['subscription_end']))}</b>"
+        )
+
+    subscription_payment = seller.get("subscription_next_payment")
+    if subscription_payment:
+        date = subscription_payment.get("date")
+        amount = subscription_payment.get("amount")
+        if date and amount is not None:
+            rows.append(
+                f"Следующий платёж: <b>{html.escape(str(date))} — "
+                f"{html.escape(money(amount))}</b>"
+            )
+        elif date:
+            rows.append(
+                f"Следующий платёж: <b>{html.escape(str(date))}</b>"
+            )
 
     warnings = seller.get("warnings") or []
     if warnings and any("429" in warning for warning in warnings):
