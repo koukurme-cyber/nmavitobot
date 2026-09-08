@@ -1,0 +1,15 @@
+{
+  "timezone": "Europe/Moscow",
+  "sellers": [
+    {
+      "key": "aggregaty",
+      "name": "Агрегаты",
+      "env_prefix": "AVITO_AGGREGATY"
+    },
+    {
+      "key": "avmex",
+      "name": "Авмекс",
+      "env_prefix": "AVITO_AVMEX"
+    }
+  ]
+}
