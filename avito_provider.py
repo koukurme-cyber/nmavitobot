@@ -78,7 +78,8 @@ def request_json(
 
                 print(
                     f"Avito 429 for {path}; retry in {wait_seconds:.1f}s "
-                    f"({attempt + 1}/{max_retries})"
+                    f"({attempt + 1}/{max_retries})",
+                    flush=True,
                 )
                 time.sleep(wait_seconds)
                 continue
@@ -181,7 +182,7 @@ def get_advance(account_key, token, user_id=None):
     except Exception as exc:
         # Не каждый аккаунт является агентством. В этом случае пробуем
         # старый CPA v2 как совместимый резервный способ.
-        print(f"Agency advance unavailable for {account_key}: {exc}")
+        print(f"Agency advance unavailable for {account_key}: {exc}", flush=True)
 
     # Резерв: старый CPA v2. Оставлен только потому, что на части
     # бизнес-аккаунтов он всё ещё может возвращать advance.
@@ -200,7 +201,7 @@ def get_advance(account_key, token, user_id=None):
                 value = amount / 100.0
 
         except Exception as exc:
-            print(f"CPA advance unavailable for {account_key}: {exc}")
+            print(f"CPA advance unavailable for {account_key}: {exc}", flush=True)
 
     _advance_cache[account_key] = {
         "value": value,

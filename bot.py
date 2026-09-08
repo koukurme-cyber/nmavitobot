@@ -1,6 +1,7 @@
 import html
 import json
 import os
+import sys
 import threading
 import time
 import urllib.parse
@@ -9,6 +10,14 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from avito_provider import get_status
+
+# BotHost/Docker может буферизовать stdout. Делаем логи видимыми сразу.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -120,7 +129,7 @@ def delete_message_later(chat_id, message_id, delay=600):
                 {"chat_id": chat_id, "message_id": message_id},
             )
         except Exception as exc:
-            print("DELETE ERROR:", exc)
+            print("DELETE ERROR:", exc, flush=True)
 
     timer = threading.Timer(delay, delete)
     timer.daemon = True
@@ -191,7 +200,7 @@ def handle_update(update):
 
 
 def main():
-    print("Bot started")
+    print("Bot started", flush=True)
     offset = None
 
     while True:
@@ -215,7 +224,7 @@ def main():
         except KeyboardInterrupt:
             break
         except Exception as exc:
-            print("ERROR:", exc)
+            print("ERROR:", exc, flush=True)
             time.sleep(3)
 
 
