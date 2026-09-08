@@ -138,7 +138,7 @@ def get_advance(account_key, token):
     now = time.time()
     cached = _advance_cache.get(account_key)
 
-    # CPA v2: максимум 1 запрос в минуту.
+    # CPA v2 имеет жёсткий лимит около 1 запроса в минуту.
     if cached and cached["expires_at"] > now:
         return cached["value"]
 
@@ -151,15 +151,23 @@ def get_advance(account_key, token):
             headers={"X-Source": "avito-telegram-status-bot"},
         )
 
-        # У этого deprecated endpoint возможен HTTP 200 даже с полем error.
-        api_error = data.get("error")
-        raw_advance = data.get("advance")
+        # По опубликованной схеме balance/advance лежат на верхнем уровне.
+        # На реальных аккаунтах Avito может завернуть ответ в {"result": {...}}.
+        payload = data.get("result") if isinstance(data, dict) else None
+        if not isinstance(payload, dict):
+            payload = data if isinstance(data, dict) else {}
+
+        raw_advance = payload.get("advance")
+        api_error = payload.get("error") or (
+            data.get("error") if isinstance(data, dict) else None
+        )
 
         print(
             f"CPA v2 {account_key}: "
             f"advance={raw_advance!r}, "
             f"error={api_error!r}, "
-            f"keys={list(data.keys())}",
+            f"top_keys={list(data.keys()) if isinstance(data, dict) else []}, "
+            f"payload_keys={list(payload.keys())}",
             flush=True,
         )
 
@@ -169,7 +177,7 @@ def get_advance(account_key, token):
         value = None
         if raw_advance is not None:
             try:
-                # На случай, если API отдаст число строкой.
+                # CPA v2 возвращает сумму в копейках.
                 value = float(raw_advance) / 100.0
             except (TypeError, ValueError):
                 print(
@@ -187,7 +195,6 @@ def get_advance(account_key, token):
     except Exception as exc:
         print(f"CPA advance unavailable for {account_key}: {exc}", flush=True)
 
-        # Не теряем последнее успешное значение при временной ошибке.
         if cached and "value" in cached:
             _advance_cache[account_key] = {
                 "value": cached["value"],
@@ -238,8 +245,9 @@ def get_items_counts(account_key, token):
         if len(items) < per_page:
             break
 
-        # Намного осторожнее: максимум примерно 1 страница в 1.5 сек.
-        time.sleep(1.5)
+        # Avito начинает ограничивать длинную серию запросов примерно после 20–25 страниц.
+        # Держим темп ниже этого порога; обновление выполняется в фоне.
+        time.sleep(2.6)
 
         page += 1
 

@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from avito_provider import get_status
@@ -22,6 +23,11 @@ except Exception:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+DATA_DIR = Path(os.getenv("DATA_DIR", os.path.join(BASE_DIR, "data")))
+CACHE_PATH = DATA_DIR / "status_cache.json"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+_refresh_lock = threading.Lock()
 
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -101,19 +107,81 @@ def seller_block(seller):
     return "\n".join(rows)
 
 
-def render_status():
-    data = get_status(CONFIG)
+def render_status(data, fetched_at=None):
     blocks = ["<b>Авито</b>"]
 
     for seller in data["sellers"]:
         blocks.append(seller_block(seller))
 
-    tz = CONFIG.get("timezone", "Europe/Moscow")
-    now = datetime.now(ZoneInfo(tz)).strftime("%d.%m.%Y %H:%M")
-    blocks.append(f"Обновлено: {now}")
+    if fetched_at:
+        blocks.append(f"Обновлено: {html.escape(str(fetched_at))}")
+    else:
+        tz_name = CONFIG.get("timezone", "Europe/Moscow")
+        now = datetime.now(ZoneInfo(tz_name)).strftime("%d.%m.%Y %H:%M")
+        blocks.append(f"Обновлено: {now}")
 
     return "\n\n".join(blocks)
 
+
+def load_cached_status():
+    try:
+        if not CACHE_PATH.exists():
+            return None
+        with CACHE_PATH.open("r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if not isinstance(cached, dict) or "data" not in cached:
+            return None
+        return cached
+    except Exception as exc:
+        print("CACHE READ ERROR:", exc, flush=True)
+        return None
+
+
+def save_cached_status(data, fetched_at):
+    tmp_path = CACHE_PATH.with_suffix(".tmp")
+    payload = {
+        "data": data,
+        "fetched_at": fetched_at,
+    }
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        tmp_path.replace(CACHE_PATH)
+    except Exception as exc:
+        print("CACHE WRITE ERROR:", exc, flush=True)
+
+
+def refresh_status_message(chat_id, message_id):
+    # Не запускаем второй тяжёлый обход, пока первый ещё идёт.
+    if not _refresh_lock.acquire(blocking=False):
+        return
+
+    try:
+        data = get_status(CONFIG)
+        tz_name = CONFIG.get("timezone", "Europe/Moscow")
+        fetched_at = datetime.now(ZoneInfo(tz_name)).strftime("%d.%m.%Y %H:%M")
+        save_cached_status(data, fetched_at)
+
+        try:
+            telegram_api(
+                "editMessageText",
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": render_status(data, fetched_at),
+                    "parse_mode": "HTML",
+                    "reply_markup": keyboard(),
+                    "disable_web_page_preview": "true",
+                },
+            )
+        except Exception as exc:
+            # Сообщение могло быть удалено пользователем или уже истечь.
+            if "message is not modified" not in str(exc).lower():
+                print("BACKGROUND EDIT ERROR:", exc, flush=True)
+    except Exception as exc:
+        print("BACKGROUND REFRESH ERROR:", exc, flush=True)
+    finally:
+        _refresh_lock.release()
 
 def keyboard():
     return json.dumps(
@@ -141,12 +209,31 @@ def delete_message_later(chat_id, message_id, delay=600):
     timer.start()
 
 
+def start_background_refresh(chat_id, message_id):
+    thread = threading.Thread(
+        target=refresh_status_message,
+        args=(chat_id, message_id),
+        daemon=True,
+    )
+    thread.start()
+
+
 def send_status(chat_id):
+    cached = load_cached_status()
+
+    if cached:
+        text = render_status(
+            cached["data"],
+            cached.get("fetched_at"),
+        )
+    else:
+        text = "<b>Авито</b>\n\nПолучаю актуальные данные…"
+
     message = telegram_api(
         "sendMessage",
         {
             "chat_id": chat_id,
-            "text": render_status(),
+            "text": text,
             "parse_mode": "HTML",
             "reply_markup": keyboard(),
             "disable_web_page_preview": "true",
@@ -159,24 +246,40 @@ def send_status(chat_id):
         delay=600,
     )
 
+    # Сразу возвращаем управление Telegram, а Avito обновляем отдельно.
+    start_background_refresh(
+        chat_id,
+        message["message_id"],
+    )
+
 
 def edit_status(chat_id, message_id):
-    try:
-        telegram_api(
-            "editMessageText",
-            {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": render_status(),
-                "parse_mode": "HTML",
-                "reply_markup": keyboard(),
-                "disable_web_page_preview": "true",
-            },
-        )
-    except Exception as exc:
-        if "message is not modified" not in str(exc).lower():
-            raise
+    cached = load_cached_status()
 
+    if cached:
+        try:
+            telegram_api(
+                "editMessageText",
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": render_status(
+                        cached["data"],
+                        cached.get("fetched_at"),
+                    ),
+                    "parse_mode": "HTML",
+                    "reply_markup": keyboard(),
+                    "disable_web_page_preview": "true",
+                },
+            )
+        except Exception as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+
+    start_background_refresh(
+        chat_id,
+        message_id,
+    )
 
 def handle_update(update):
     message = update.get("message")
