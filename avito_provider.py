@@ -355,14 +355,15 @@ def get_seller_finances(seller, timezone_name):
         "key": key,
         "name": seller["name"],
         "financial_mode": financial_mode,
+        "subscription_name": seller.get("subscription_name"),
         "wallet": None,
         "advance": None,
         "placements_remaining": None,
         "tariff_end": None,
         "next_tariff": None,
         "ads": {},
+        "ads_pending": True,
         "warnings": [],
-        "_token": token,
     }
 
     try:
@@ -376,26 +377,34 @@ def get_seller_finances(seller, timezone_name):
         except Exception as exc:
             result["warnings"].append(f"аванс: {exc}")
 
-    try:
-        tariff = get_tariff_details(key, token, timezone_name)
-        result["tariff_end"] = tariff.get("tariff_end")
-        result["next_tariff"] = tariff.get("next_tariff")
-        if financial_mode == "placements":
+    # /tariff/info/1 подходит для транспортного тарифа.
+    # Для CPA-аккаунтов (advance) он возвращает 404 и не описывает их подписку,
+    # поэтому здесь его вызываем только для placement-аккаунтов.
+    if financial_mode == "placements":
+        try:
+            tariff = get_tariff_details(key, token, timezone_name)
+            result["tariff_end"] = tariff.get("tariff_end")
+            result["next_tariff"] = tariff.get("next_tariff")
             result["placements_remaining"] = tariff.get("placements_remaining")
-    except Exception as exc:
-        result["warnings"].append(f"тариф: {exc}")
+        except Exception as exc:
+            result["warnings"].append(f"тариф: {exc}")
 
     return result
 
 
-def add_seller_items(result):
-    token = result.get("_token")
+def _seller_token(seller):
+    key = seller["key"]
+    prefix = seller["env_prefix"]
+    client_id = env(prefix + "_CLIENT_ID")
+    client_secret = env(prefix + "_CLIENT_SECRET")
+    return get_token(key, client_id, client_secret)
+
+
+def add_seller_items(result, seller_config):
     key = result["key"]
 
-    if not token:
-        return result
-
     try:
+        token = _seller_token(seller_config)
         counts = get_items_counts(key, token)
         result["ads"] = {
             "published": counts["active"],
@@ -406,15 +415,16 @@ def add_seller_items(result):
         }
     except Exception as exc:
         result["warnings"].append(f"объявления: {exc}")
+    finally:
+        result["ads_pending"] = False
 
     return result
 
 
-def get_status(config):
+def get_financial_status(config):
     timezone_name = config.get("timezone", "Europe/Moscow")
     sellers = []
 
-    # Фаза 1: сначала быстро собираем финансовые данные по всем аккаунтам.
     for index, seller in enumerate(config["sellers"]):
         try:
             sellers.append(get_seller_finances(seller, timezone_name))
@@ -424,12 +434,14 @@ def get_status(config):
                     "key": seller["key"],
                     "name": seller["name"],
                     "financial_mode": seller.get("financial_mode", "advance"),
+                    "subscription_name": seller.get("subscription_name"),
                     "wallet": None,
                     "advance": None,
                     "placements_remaining": None,
                     "tariff_end": None,
                     "next_tariff": None,
                     "ads": {},
+                    "ads_pending": False,
                     "warnings": [],
                     "error": str(exc),
                 }
@@ -439,15 +451,28 @@ def get_status(config):
             time.sleep(1.0)
 
     print("Financial phase completed", flush=True)
+    return {"sellers": sellers, "phase": "finances"}
 
-    # Фаза 2: только после этого запускаем тяжёлый обход объявлений.
-    for result in sellers:
+
+def enrich_status_with_items(data, config):
+    configs_by_key = {seller["key"]: seller for seller in config["sellers"]}
+
+    for result in data["sellers"]:
         if result.get("error"):
             continue
-        add_seller_items(result)
 
-    # Внутренний токен в Telegram/кэш не отдаём.
-    for result in sellers:
-        result.pop("_token", None)
+        seller_config = configs_by_key.get(result["key"])
+        if not seller_config:
+            result["ads_pending"] = False
+            result["warnings"].append("объявления: конфигурация аккаунта не найдена")
+            continue
 
-    return {"sellers": sellers}
+        add_seller_items(result, seller_config)
+
+    data["phase"] = "complete"
+    return data
+
+
+def get_status(config):
+    data = get_financial_status(config)
+    return enrich_status_with_items(data, config)

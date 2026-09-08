@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from avito_provider import get_status
+from avito_provider import get_financial_status, enrich_status_with_items
 
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -72,6 +72,11 @@ def seller_block(seller):
 
     rows.append(f"Кошелёк: <b>{html.escape(money(seller.get('wallet')))}</b>")
 
+    if seller.get("subscription_name"):
+        rows.append(
+            f"Подписка: <b>{html.escape(str(seller['subscription_name']))}</b>"
+        )
+
     if seller.get("financial_mode") == "placements":
         if seller.get("placements_remaining") is not None:
             rows.append(
@@ -82,6 +87,9 @@ def seller_block(seller):
             rows.append(f"Аванс: <b>{html.escape(money(seller.get('advance')))}</b>")
 
     stats = seller.get("ads", {})
+    if seller.get("ads_pending"):
+        rows.append("<i>Объявления обновляются…</i>")
+
     labels = [
         ("published", "Опубликовано"),
         ("rejected", "Отклонено"),
@@ -157,30 +165,44 @@ def save_cached_status(data, fetched_at):
         print("CACHE WRITE ERROR:", exc, flush=True)
 
 
+def _edit_status_message(chat_id, message_id, data, fetched_at):
+    try:
+        telegram_api(
+            "editMessageText",
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": render_status(data, fetched_at),
+                "parse_mode": "HTML",
+                "disable_web_page_preview": "true",
+            },
+        )
+    except Exception as exc:
+        if "message is not modified" not in str(exc).lower():
+            print("BACKGROUND EDIT ERROR:", exc, flush=True)
+
+
 def refresh_status_message(chat_id, message_id):
     if not _refresh_lock.acquire(blocking=False):
         return
 
     try:
-        data = get_status(CONFIG)
         tz_name = CONFIG.get("timezone", "Europe/Moscow")
+
+        # Этап 1: быстро обновляем деньги и тарифы по всем аккаунтам.
+        data = get_financial_status(CONFIG)
         fetched_at = datetime.now(ZoneInfo(tz_name)).strftime("%d.%m.%Y %H:%M")
         save_cached_status(data, fetched_at)
+        _edit_status_message(chat_id, message_id, data, fetched_at)
+        print("Telegram updated after financial phase", flush=True)
 
-        try:
-            telegram_api(
-                "editMessageText",
-                {
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "text": render_status(data, fetched_at),
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": "true",
-                },
-            )
-        except Exception as exc:
-            if "message is not modified" not in str(exc).lower():
-                print("BACKGROUND EDIT ERROR:", exc, flush=True)
+        # Этап 2: медленно пересчитываем объявления и обновляем то же сообщение ещё раз.
+        data = enrich_status_with_items(data, CONFIG)
+        fetched_at = datetime.now(ZoneInfo(tz_name)).strftime("%d.%m.%Y %H:%M")
+        save_cached_status(data, fetched_at)
+        _edit_status_message(chat_id, message_id, data, fetched_at)
+        print("Telegram updated after ads phase", flush=True)
+
     except Exception as exc:
         print("BACKGROUND REFRESH ERROR:", exc, flush=True)
     finally:
