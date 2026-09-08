@@ -133,38 +133,81 @@ def get_wallet(token, user_id):
     return data.get("real")
 
 
-def get_advance(account_key, token):
+def get_advance(account_key, token, user_id=None):
     now = time.time()
     cached = _advance_cache.get(account_key)
 
     if cached and cached["expires_at"] > now:
         return cached["value"]
 
+    value = None
+
+    # Основной способ: API иерархии аккаунтов.
+    # Он умеет отдавать остаток аванса тарифа как advance.amount (в копейках).
     try:
         data = request_json(
             "POST",
-            "/cpa/v2/balanceInfo",
+            "/api/1/agency/clients",
             token=token,
-            data={},
-            headers={"X-Source": "avito-telegram-status-bot"},
+            data={
+                "limit": 100,
+                "offset": 0,
+                "extra": {
+                    "advance": True,
+                },
+            },
         )
 
-        value = data.get("advance")
-        if isinstance(value, (int, float)):
-            value = value / 100.0
-        else:
-            value = None
+        clients = ((data.get("result") or {}).get("clients")) or []
 
-    except Exception:
-        value = None
+        # Если API доступен, пытаемся найти текущий аккаунт по clientId/mainUserId.
+        matched = None
+        if user_id is not None:
+            for client in clients:
+                if client.get("clientId") == user_id or client.get("mainUserId") == user_id:
+                    matched = client
+                    break
+
+        # Для ключа, принадлежащего агентству с единственным клиентом,
+        # безопасно использовать единственную запись.
+        if matched is None and len(clients) == 1:
+            matched = clients[0]
+
+        if matched:
+            amount = (matched.get("advance") or {}).get("amount")
+            if isinstance(amount, (int, float)):
+                value = amount / 100.0
+
+    except Exception as exc:
+        # Не каждый аккаунт является агентством. В этом случае пробуем
+        # старый CPA v2 как совместимый резервный способ.
+        print(f"Agency advance unavailable for {account_key}: {exc}")
+
+    # Резерв: старый CPA v2. Оставлен только потому, что на части
+    # бизнес-аккаунтов он всё ещё может возвращать advance.
+    if value is None:
+        try:
+            data = request_json(
+                "POST",
+                "/cpa/v2/balanceInfo",
+                token=token,
+                data={},
+                headers={"X-Source": "avito-telegram-status-bot"},
+            )
+
+            amount = data.get("advance")
+            if isinstance(amount, (int, float)):
+                value = amount / 100.0
+
+        except Exception as exc:
+            print(f"CPA advance unavailable for {account_key}: {exc}")
 
     _advance_cache[account_key] = {
         "value": value,
-        "expires_at": now + 65,
+        "expires_at": now + 600,
     }
 
     return value
-
 
 def get_items_counts(account_key, token):
     # Статусы объявлений меняются не каждую секунду.
@@ -294,7 +337,7 @@ def get_seller_status(seller, timezone_name):
         result["warnings"].append(f"кошелёк: {exc}")
 
     try:
-        result["advance"] = get_advance(key, token)
+        result["advance"] = get_advance(key, token, user_id)
     except Exception as exc:
         result["warnings"].append(f"аванс: {exc}")
 
