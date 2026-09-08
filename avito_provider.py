@@ -332,7 +332,7 @@ def get_tariff_details(account_key, token, timezone_name):
     return value
 
 
-def get_seller_status(seller, timezone_name):
+def get_seller_finances(seller, timezone_name):
     key = seller["key"]
     prefix = seller["env_prefix"]
     financial_mode = seller.get("financial_mode", "advance")
@@ -358,6 +358,7 @@ def get_seller_status(seller, timezone_name):
         "next_tariff": None,
         "ads": {},
         "warnings": [],
+        "_token": token,
     }
 
     try:
@@ -380,6 +381,16 @@ def get_seller_status(seller, timezone_name):
     except Exception as exc:
         result["warnings"].append(f"тариф: {exc}")
 
+    return result
+
+
+def add_seller_items(result):
+    token = result.get("_token")
+    key = result["key"]
+
+    if not token:
+        return result
+
     try:
         counts = get_items_counts(key, token)
         result["ads"] = {
@@ -399,19 +410,40 @@ def get_status(config):
     timezone_name = config.get("timezone", "Europe/Moscow")
     sellers = []
 
+    # Фаза 1: сначала быстро собираем финансовые данные по всем аккаунтам.
     for index, seller in enumerate(config["sellers"]):
         try:
-            sellers.append(get_seller_status(seller, timezone_name))
+            sellers.append(get_seller_finances(seller, timezone_name))
         except Exception as exc:
             sellers.append(
                 {
                     "key": seller["key"],
                     "name": seller["name"],
+                    "financial_mode": seller.get("financial_mode", "advance"),
+                    "wallet": None,
+                    "advance": None,
+                    "placements_remaining": None,
+                    "tariff_end": None,
+                    "next_tariff": None,
+                    "ads": {},
+                    "warnings": [],
                     "error": str(exc),
                 }
             )
 
         if index < len(config["sellers"]) - 1:
-            time.sleep(1.5)
+            time.sleep(1.0)
+
+    print("Financial phase completed", flush=True)
+
+    # Фаза 2: только после этого запускаем тяжёлый обход объявлений.
+    for result in sellers:
+        if result.get("error"):
+            continue
+        add_seller_items(result)
+
+    # Внутренний токен в Telegram/кэш не отдаём.
+    for result in sellers:
+        result.pop("_token", None)
 
     return {"sellers": sellers}
