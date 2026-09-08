@@ -134,81 +134,49 @@ def get_wallet(token, user_id):
     return data.get("real")
 
 
-def get_advance(account_key, token, user_id=None):
+def get_advance(account_key, token):
     now = time.time()
     cached = _advance_cache.get(account_key)
 
+    # CPA v2 имеет жёсткий лимит около 1 запроса в минуту.
+    # Поэтому используем кэш минимум 65 секунд.
     if cached and cached["expires_at"] > now:
         return cached["value"]
 
-    value = None
-
-    # Основной способ: API иерархии аккаунтов.
-    # Он умеет отдавать остаток аванса тарифа как advance.amount (в копейках).
     try:
         data = request_json(
             "POST",
-            "/api/1/agency/clients",
+            "/cpa/v2/balanceInfo",
             token=token,
-            data={
-                "limit": 100,
-                "offset": 0,
-                "extra": {
-                    "advance": True,
-                },
-            },
+            data={},
+            headers={"X-Source": "avito-telegram-status-bot"},
         )
 
-        clients = ((data.get("result") or {}).get("clients")) or []
+        amount = data.get("advance")
+        if isinstance(amount, (int, float)):
+            value = amount / 100.0
+        else:
+            value = None
 
-        # Если API доступен, пытаемся найти текущий аккаунт по clientId/mainUserId.
-        matched = None
-        if user_id is not None:
-            for client in clients:
-                if client.get("clientId") == user_id or client.get("mainUserId") == user_id:
-                    matched = client
-                    break
-
-        # Для ключа, принадлежащего агентству с единственным клиентом,
-        # безопасно использовать единственную запись.
-        if matched is None and len(clients) == 1:
-            matched = clients[0]
-
-        if matched:
-            amount = (matched.get("advance") or {}).get("amount")
-            if isinstance(amount, (int, float)):
-                value = amount / 100.0
+        _advance_cache[account_key] = {
+            "value": value,
+            "expires_at": now + 65,
+        }
+        return value
 
     except Exception as exc:
-        # Не каждый аккаунт является агентством. В этом случае пробуем
-        # старый CPA v2 как совместимый резервный способ.
-        print(f"Agency advance unavailable for {account_key}: {exc}", flush=True)
+        print(f"CPA advance unavailable for {account_key}: {exc}", flush=True)
 
-    # Резерв: старый CPA v2. Оставлен только потому, что на части
-    # бизнес-аккаунтов он всё ещё может возвращать advance.
-    if value is None:
-        try:
-            data = request_json(
-                "POST",
-                "/cpa/v2/balanceInfo",
-                token=token,
-                data={},
-                headers={"X-Source": "avito-telegram-status-bot"},
-            )
+        # Если раньше уже было успешное значение, не теряем его из-за
+        # временного лимита/API-сбоя.
+        if cached and "value" in cached:
+            _advance_cache[account_key] = {
+                "value": cached["value"],
+                "expires_at": now + 65,
+            }
+            return cached["value"]
 
-            amount = data.get("advance")
-            if isinstance(amount, (int, float)):
-                value = amount / 100.0
-
-        except Exception as exc:
-            print(f"CPA advance unavailable for {account_key}: {exc}", flush=True)
-
-    _advance_cache[account_key] = {
-        "value": value,
-        "expires_at": now + 600,
-    }
-
-    return value
+        return None
 
 def get_items_counts(account_key, token):
     # Статусы объявлений меняются не каждую секунду.
@@ -330,18 +298,26 @@ def get_seller_status(seller, timezone_name):
         "warnings": [],
     }
 
-    # Баланс не должен пропадать только потому, что Avito ограничил
-    # запросы к списку объявлений.
+    # Сначала быстрые финансовые данные.
     try:
         result["wallet"] = get_wallet(token, user_id)
     except Exception as exc:
         result["warnings"].append(f"кошелёк: {exc}")
 
     try:
-        result["advance"] = get_advance(key, token, user_id)
+        result["advance"] = get_advance(key, token)
     except Exception as exc:
         result["warnings"].append(f"аванс: {exc}")
 
+    try:
+        result["next_payment"] = get_next_tariff_payment(
+            token,
+            timezone_name,
+        )
+    except Exception as exc:
+        result["warnings"].append(f"тариф: {exc}")
+
+    # И только после этого — тяжёлый обход объявлений.
     try:
         counts = get_items_counts(key, token)
         result["ads"] = {
@@ -353,14 +329,6 @@ def get_seller_status(seller, timezone_name):
         }
     except Exception as exc:
         result["warnings"].append(f"объявления: {exc}")
-
-    try:
-        result["next_payment"] = get_next_tariff_payment(
-            token,
-            timezone_name,
-        )
-    except Exception as exc:
-        result["warnings"].append(f"тариф: {exc}")
 
     return result
 
