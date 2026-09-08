@@ -290,6 +290,29 @@ def get_tariff_details(account_key, token, timezone_name):
 
     placements_remaining = None
     packages = current.get("packages") or []
+
+    print(
+        f"Tariff raw {account_key}: "
+        f"current_keys={list(current.keys()) if isinstance(current, dict) else []}, "
+        f"packages_count={len(packages) if isinstance(packages, list) else 0}",
+        flush=True,
+    )
+
+    if isinstance(packages, list):
+        for idx, package in enumerate(packages, start=1):
+            if isinstance(package, dict):
+                print(
+                    f"Tariff package {account_key} #{idx}: "
+                    f"keys={list(package.keys())}, "
+                    f"payload={package!r}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"Tariff package {account_key} #{idx}: unexpected={package!r}",
+                    flush=True,
+                )
+
     remains = [
         package.get("remain")
         for package in packages
