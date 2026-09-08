@@ -231,3 +231,29 @@ v24 проверяет этот endpoint для `nm_orange` и `nm_blue`
 ## v27
 
 Добавлена команда `/balance_all` — вывод балансов всех аккаунтов. `/balance <аккаунт>` оставлена для конкретного аккаунта.
+
+
+## v28
+
+- Табличный вывод отменён: возвращён обычный построчный формат по аккаунтам.
+- Команды без аргументов, единый формат `тип_аккаунт`.
+- Для баланса используется написание `balance`, как запрошено.
+
+Основные команды:
+- `/status_all`, `/balance_all`, `/ads_all`
+- `/status_aggregaty`, `/balance_aggregaty`, `/ads_aggregaty`
+- `/status_avmex`, `/balance_avmex`, `/ads_avmex`
+- `/status_orange`, `/balance_orange`, `/ads_orange`
+- `/status_blue`, `/balance_blue`, `/ads_blue`
+- `/status_tir`, `/balance_tir`, `/ads_tir`
+
+
+## v29
+
+Исправлено название команд баланса:
+- `/balance_all`
+- `/balance_aggregaty`
+- `/balance_avmex`
+- `/balance_orange`
+- `/balance_blue`
+- `/balance_tir`

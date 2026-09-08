@@ -27,7 +27,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 _refresh_lock = threading.Lock()
 _keyboard_cleared_chats = set()
-APP_VERSION = "v27"
+APP_VERSION = "v29"
 
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -176,118 +176,152 @@ def _updated_line(fetched_at=None):
     return f"Обновлено: {now}"
 
 
+
+def _seller_full_block(seller):
+    name = html.escape(seller.get("name") or _seller_short_name(seller))
+
+    if seller.get("error"):
+        return f"<b>{name}</b>\nОшибка: {html.escape(str(seller['error']))}"
+
+    stats = seller.get("ads") or {}
+    lines = [f"<b>{name}</b>"]
+
+    lines.append(f"Кошелёк: {money(seller.get('wallet'))}")
+
+    if seller.get("financial_mode") == "placements":
+        if seller.get("placements_remaining") is not None:
+            lines.append(
+                f"Остаток размещений: {plain_number(seller.get('placements_remaining'))}"
+            )
+    elif seller.get("advance") is not None:
+        lines.append(f"Аванс: {money(seller.get('advance'))}")
+
+    lines.extend([
+        f"Опубликовано: {plain_number(stats.get('published'))}",
+        f"Отклонено: {plain_number(stats.get('rejected'))}",
+        f"Заблокировано: {plain_number(stats.get('blocked'))}",
+        f"Снято: {plain_number(stats.get('removed'))}",
+        f"Завершено: {plain_number(stats.get('old'))}",
+    ])
+
+    end_date = seller.get("subscription_end") or seller.get("tariff_end")
+    if end_date:
+        label = "Тариф до" if seller.get("financial_mode") == "placements" else "Подписка до"
+        lines.append(f"{label}: {html.escape(str(end_date))}")
+
+    payment = seller.get("subscription_next_payment") or seller.get("next_tariff")
+    if isinstance(payment, dict) and payment:
+        date = payment.get("date")
+        amount = payment.get("amount")
+        if date and amount is not None:
+            lines.append(f"Следующий платёж: {html.escape(str(date))} — {money(amount)}")
+        elif date:
+            lines.append(f"Следующий платёж: {html.escape(str(date))}")
+        elif amount is not None:
+            lines.append(f"Следующий платёж: {money(amount)}")
+
+    return "\n".join(lines)
+
+
+def _seller_balance_block(seller):
+    name = html.escape(seller.get("name") or _seller_short_name(seller))
+
+    if seller.get("error"):
+        return f"<b>{name}</b>\nОшибка: {html.escape(str(seller['error']))}"
+
+    lines = [
+        f"<b>{name}</b>",
+        f"Кошелёк: {money(seller.get('wallet'))}",
+    ]
+
+    if seller.get("financial_mode") == "placements":
+        if seller.get("placements_remaining") is not None:
+            lines.append(
+                f"Остаток размещений: {plain_number(seller.get('placements_remaining'))}"
+            )
+    elif seller.get("advance") is not None:
+        lines.append(f"Аванс: {money(seller.get('advance'))}")
+
+    end_date = seller.get("subscription_end") or seller.get("tariff_end")
+    if end_date:
+        label = "Тариф до" if seller.get("financial_mode") == "placements" else "Подписка до"
+        lines.append(f"{label}: {html.escape(str(end_date))}")
+
+    payment = seller.get("subscription_next_payment") or seller.get("next_tariff")
+    if isinstance(payment, dict) and payment:
+        date = payment.get("date")
+        amount = payment.get("amount")
+        if date and amount is not None:
+            lines.append(f"Следующий платёж: {html.escape(str(date))} — {money(amount)}")
+        elif date:
+            lines.append(f"Следующий платёж: {html.escape(str(date))}")
+        elif amount is not None:
+            lines.append(f"Следующий платёж: {money(amount)}")
+
+    return "\n".join(lines)
+
+
+def _seller_ads_block(seller):
+    name = html.escape(seller.get("name") or _seller_short_name(seller))
+
+    if seller.get("error"):
+        return f"<b>{name}</b>\nОшибка: {html.escape(str(seller['error']))}"
+
+    stats = seller.get("ads") or {}
+    return "\n".join([
+        f"<b>{name}</b>",
+        f"Опубликовано: {plain_number(stats.get('published'))}",
+        f"Отклонено: {plain_number(stats.get('rejected'))}",
+        f"Заблокировано: {plain_number(stats.get('blocked'))}",
+        f"Снято: {plain_number(stats.get('removed'))}",
+        f"Завершено: {plain_number(stats.get('old'))}",
+    ])
+
+
 def render_status(data, fetched_at=None):
-    sellers = data["sellers"]
-    blocks = ["<b>Авито · общий статус</b>"]
-
-    blocks.append("<b>Финансы, ₽</b>\n" + _pre(_format_table(
-        ["Аккаунт", "Кошел.", "Аванс", "Места"],
-        _financial_rows(sellers),
-        ["left", "right", "right", "right"],
-    )))
-
-    blocks.append("<b>Объявления</b>\n" + _pre(_format_table(
-        ["Аккаунт", "Опубл", "Откл", "Блок", "Снято", "Зав."],
-        _ads_rows(sellers),
-        ["left", "right", "right", "right", "right", "right"],
-    )))
-
-    period_rows = _period_rows(sellers)
-    if period_rows:
-        blocks.append("<b>Тарифы и подписки</b>\n" + _pre(_format_table(
-            ["Аккаунт", "До", "След.", "Сумма"],
-            period_rows,
-            ["left", "left", "left", "right"],
-        )))
-
-    errors = [seller for seller in sellers if seller.get("error")]
-    if errors:
-        blocks.append("\n".join(
-            f"{html.escape(_seller_short_name(s))}: {html.escape(str(s['error']))}"
-            for s in errors
-        ))
-
+    blocks = ["<b>Авито</b>"]
+    blocks.extend(_seller_full_block(seller) for seller in data["sellers"])
     blocks.append(_updated_line(fetched_at))
     return "\n\n".join(blocks)
 
 
 def render_balances(data, fetched_at=None):
-    sellers = data["sellers"]
-    lines = _format_table(
-        ["Аккаунт", "Кошел.", "Аванс", "Места"],
-        _financial_rows(sellers),
-        ["left", "right", "right", "right"],
-    )
-    return "\n\n".join([
-        "<b>Авито · балансы, ₽</b>",
-        _pre(lines),
-        _updated_line(fetched_at),
-    ])
+    blocks = ["<b>Авито · баланс</b>"]
+    blocks.extend(_seller_balance_block(seller) for seller in data["sellers"])
+    blocks.append(_updated_line(fetched_at))
+    return "\n\n".join(blocks)
 
 
 def render_ads(data, fetched_at=None):
-    sellers = data["sellers"]
-    lines = _format_table(
-        ["Аккаунт", "Опубл", "Откл", "Блок", "Снято", "Зав."],
-        _ads_rows(sellers),
-        ["left", "right", "right", "right", "right", "right"],
-    )
-    return "\n\n".join([
-        "<b>Авито · объявления</b>",
-        _pre(lines),
-        _updated_line(fetched_at),
-    ])
+    blocks = ["<b>Авито · объявления</b>"]
+    blocks.extend(_seller_ads_block(seller) for seller in data["sellers"])
+    blocks.append(_updated_line(fetched_at))
+    return "\n\n".join(blocks)
 
 
 def render_account(data, fetched_at=None):
-    seller = data["sellers"][0]
-    title = html.escape(seller.get("name") or _seller_short_name(seller))
-    if seller.get("error"):
-        return f"<b>{title}</b>\n\nОшибка получения данных: {html.escape(str(seller['error']))}"
-
-    stats = seller.get("ads") or {}
-    rows = [
-        ["Кошелёк", money(seller.get("wallet"))],
-    ]
-    if seller.get("financial_mode") == "placements":
-        if seller.get("placements_remaining") is not None:
-            rows.append(["Остаток размещений", plain_number(seller.get("placements_remaining"))])
-    elif seller.get("advance") is not None:
-        rows.append(["Аванс", money(seller.get("advance"))])
-
-    rows.extend([
-        ["Опубликовано", plain_number(stats.get("published"))],
-        ["Отклонено", plain_number(stats.get("rejected"))],
-        ["Заблокировано", plain_number(stats.get("blocked"))],
-        ["Снято", plain_number(stats.get("removed"))],
-        ["Завершено", plain_number(stats.get("old"))],
-    ])
-
-    end_date = seller.get("subscription_end") or seller.get("tariff_end")
-    if end_date:
-        rows.append(["Подписка до" if seller.get("financial_mode") != "placements" else "Тариф до", str(end_date)])
-
-    payment = seller.get("subscription_next_payment") or seller.get("next_tariff")
-    if payment:
-        date = payment.get("date")
-        amount = payment.get("amount")
-        if date and amount is not None:
-            value = f"{date} · {money(amount)}"
-        elif date:
-            value = str(date)
-        elif amount is not None:
-            value = money(amount)
-        else:
-            value = "—"
-        rows.append(["След. платёж", value])
-
-    width = max(len(row[0]) for row in rows)
-    lines = [f"{label.ljust(width)}  {value}" for label, value in rows]
     return "\n\n".join([
-        f"<b>{title}</b>",
-        _pre(lines),
+        "<b>Авито</b>",
+        _seller_full_block(data["sellers"][0]),
         _updated_line(fetched_at),
     ])
+
+
+def render_account_balance(data, fetched_at=None):
+    return "\n\n".join([
+        "<b>Авито · баланс</b>",
+        _seller_balance_block(data["sellers"][0]),
+        _updated_line(fetched_at),
+    ])
+
+
+def render_account_ads(data, fetched_at=None):
+    return "\n\n".join([
+        "<b>Авито · объявления</b>",
+        _seller_ads_block(data["sellers"][0]),
+        _updated_line(fetched_at),
+    ])
+
 
 def load_cached_status():
     try:
@@ -356,10 +390,10 @@ def refresh_query_message(chat_id, message_id, mode="full", seller_key=None):
 
             if mode == "finance":
                 data = get_financial_status(query_config)
-                renderer = render_balances
+                renderer = render_account_balance if seller_key else render_balances
             elif mode == "ads":
                 data = get_items_status(query_config)
-                renderer = render_ads
+                renderer = render_account_ads if seller_key else render_ads
             else:
                 data = get_status(query_config)
                 renderer = render_account if seller_key else render_status
@@ -435,45 +469,54 @@ def remove_legacy_keyboard(chat_id):
         print("KEYBOARD REMOVE ERROR:", exc, flush=True)
 
 
-ACCOUNT_ALIASES = {
+
+ACCOUNT_COMMAND_SUFFIXES = {
     "aggregaty": "aggregaty",
-    "агрегаты": "aggregaty",
     "avmex": "avmex",
-    "авмекс": "avmex",
     "orange": "nm_orange",
-    "nm_orange": "nm_orange",
-    "оранжевые": "nm_orange",
     "blue": "nm_blue",
-    "nm_blue": "nm_blue",
-    "синие": "nm_blue",
     "tir": "tir",
-    "тир": "tir",
-}
-
-DIRECT_ACCOUNT_COMMANDS = {
-    "/aggregaty": "aggregaty",
-    "/avmex": "avmex",
-    "/orange": "nm_orange",
-    "/blue": "nm_blue",
-    "/tir": "tir",
 }
 
 
-def _resolve_account(value):
-    if not value:
-        return None
-    return ACCOUNT_ALIASES.get(value.strip().casefold())
+def _parse_direct_command(command):
+    """
+    Команды только в прямом формате:
+    /status_avmex
+    /balance_avmex
+    /ads_avmex
+    и *_all для всех аккаунтов.
+    """
+    if command == "/status_all":
+        return "full", None
+    if command == "/balance_all":
+        return "finance", None
+    if command == "/ads_all":
+        return "ads", None
+
+    for suffix, seller_key in ACCOUNT_COMMAND_SUFFIXES.items():
+        if command == f"/status_{suffix}":
+            return "full", seller_key
+        if command == f"/balance_{suffix}":
+            return "finance", seller_key
+        if command == f"/ads_{suffix}":
+            return "ads", seller_key
+
+    return None, None
 
 
-def _accounts_help():
+def _commands_help():
     return (
-        "<b>Аккаунты</b>\n\n"
-        "<code>aggregaty</code> — Агрегаты\n"
-        "<code>avmex</code> — Авмекс\n"
-        "<code>orange</code> — НМ (оранжевые)\n"
-        "<code>blue</code> — НМ (синие)\n"
-        "<code>tir</code> — ТИР\n\n"
-        "Пример: <code>/account avmex</code>"
+        "<b>Команды</b>\n\n"
+        "<code>/status_all</code> — всё по всем аккаунтам\n"
+        "<code>/balance_all</code> — баланс по всем аккаунтам\n"
+        "<code>/ads_all</code> — объявления по всем аккаунтам\n\n"
+        "Для конкретного аккаунта:\n"
+        "<code>/status_avmex</code>\n"
+        "<code>/balance_avmex</code>\n"
+        "<code>/ads_avmex</code>\n\n"
+        "Суффиксы: <code>aggregaty</code>, <code>avmex</code>, "
+        "<code>orange</code>, <code>blue</code>, <code>tir</code>"
     )
 
 
@@ -481,7 +524,7 @@ def send_query(chat_id, mode="full", seller_key=None):
     remove_legacy_keyboard(chat_id)
     labels = {
         "full": "Получаю актуальные данные…",
-        "finance": "Получаю данные по балансам…",
+        "finance": "Получаю данные по балансу…",
         "ads": "Считаю статусы объявлений…",
     }
     message = telegram_api(
@@ -506,60 +549,35 @@ def handle_update(update):
     if not text.startswith("/"):
         return
 
-    parts = text.split(maxsplit=1)
-    command = parts[0].split("@", 1)[0].casefold()
-    argument = parts[1].strip() if len(parts) > 1 else ""
+    command = text.split(maxsplit=1)[0].split("@", 1)[0].casefold()
 
-    if command in {"/start", "/status"}:
-        send_query(chat_id, "full")
-        return
-
-    if command in DIRECT_ACCOUNT_COMMANDS:
-        send_query(chat_id, "full", DIRECT_ACCOUNT_COMMANDS[command])
-        return
-
-    if command == "/account":
-        seller_key = _resolve_account(argument)
-        if not seller_key:
-            telegram_api(
-                "sendMessage",
-                {"chat_id": chat_id, "text": _accounts_help(), "parse_mode": "HTML"},
-            )
-            return
-        send_query(chat_id, "full", seller_key)
-        return
-
-    if command == "/balance_all":
-        send_query(chat_id, "finance")
-        return
-
-    if command in {"/balance", "/balances"}:
-        seller_key = _resolve_account(argument) if argument else None
-        if argument and not seller_key:
-            telegram_api(
-                "sendMessage",
-                {"chat_id": chat_id, "text": _accounts_help(), "parse_mode": "HTML"},
-            )
-            return
-        send_query(chat_id, "finance", seller_key)
-        return
-
-    if command in {"/ads", "/items"}:
-        seller_key = _resolve_account(argument) if argument else None
-        if argument and not seller_key:
-            telegram_api(
-                "sendMessage",
-                {"chat_id": chat_id, "text": _accounts_help(), "parse_mode": "HTML"},
-            )
-            return
-        send_query(chat_id, "ads", seller_key)
-        return
-
-    if command == "/accounts":
+    # /start оставляем только как вход в бота; он показывает список команд.
+    if command == "/start":
         telegram_api(
             "sendMessage",
-            {"chat_id": chat_id, "text": _accounts_help(), "parse_mode": "HTML"},
+            {
+                "chat_id": chat_id,
+                "text": _commands_help(),
+                "parse_mode": "HTML",
+            },
         )
+        return
+
+    mode, seller_key = _parse_direct_command(command)
+    if mode:
+        send_query(chat_id, mode, seller_key)
+        return
+
+    if command in {"/help", "/commands"}:
+        telegram_api(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": _commands_help(),
+                "parse_mode": "HTML",
+            },
+        )
+
 
 def main():
     print(f"Bot started {APP_VERSION}", flush=True)
@@ -575,17 +593,31 @@ def main():
             {
                 "commands": json.dumps(
                     [
-                        {"command": "status", "description": "Общий статус всех аккаунтов"},
-                        {"command": "balance_all", "description": "Балансы всех аккаунтов"},
-                        {"command": "balance", "description": "Баланс аккаунта: /balance avmex"},
-                        {"command": "ads", "description": "Только статусы объявлений"},
-                        {"command": "account", "description": "Аккаунт по имени: /account avmex"},
-                        {"command": "aggregaty", "description": "Вся информация: Агрегаты"},
-                        {"command": "avmex", "description": "Вся информация: Авмекс"},
-                        {"command": "orange", "description": "Вся информация: НМ оранжевые"},
-                        {"command": "blue", "description": "Вся информация: НМ синие"},
-                        {"command": "tir", "description": "Вся информация: ТИР"},
-                        {"command": "accounts", "description": "Показать имена аккаунтов"},
+                        {"command": "status_all", "description": "Вся информация по всем аккаунтам"},
+                        {"command": "balance_all", "description": "Баланс по всем аккаунтам"},
+                        {"command": "ads_all", "description": "Статусы объявлений по всем аккаунтам"},
+
+                        {"command": "status_aggregaty", "description": "Всё: Агрегаты"},
+                        {"command": "balance_aggregaty", "description": "Баланс: Агрегаты"},
+                        {"command": "ads_aggregaty", "description": "Объявления: Агрегаты"},
+
+                        {"command": "status_avmex", "description": "Всё: Авмекс"},
+                        {"command": "balance_avmex", "description": "Баланс: Авмекс"},
+                        {"command": "ads_avmex", "description": "Объявления: Авмекс"},
+
+                        {"command": "status_orange", "description": "Всё: НМ оранжевые"},
+                        {"command": "balance_orange", "description": "Баланс: НМ оранжевые"},
+                        {"command": "ads_orange", "description": "Объявления: НМ оранжевые"},
+
+                        {"command": "status_blue", "description": "Всё: НМ синие"},
+                        {"command": "balance_blue", "description": "Баланс: НМ синие"},
+                        {"command": "ads_blue", "description": "Объявления: НМ синие"},
+
+                        {"command": "status_tir", "description": "Всё: ТИР"},
+                        {"command": "balance_tir", "description": "Баланс: ТИР"},
+                        {"command": "ads_tir", "description": "Объявления: ТИР"},
+
+                        {"command": "commands", "description": "Показать список команд"},
                     ],
                     ensure_ascii=False,
                 )
