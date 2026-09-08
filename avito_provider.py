@@ -4,6 +4,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -263,6 +264,229 @@ def _format_unix_date(timestamp, timezone_name):
     return dt.strftime("%d.%m.%Y")
 
 
+
+def _extract_report_id(report):
+    if not isinstance(report, dict):
+        return None
+    for key in ("id", "report_id", "reportId"):
+        value = report.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
+
+
+def diagnose_placement_usage(account_key, token, timezone_name, start_timestamp):
+    """
+    Глубокая диагностика остатка размещений для транспортного тарифа.
+
+    1) История операций с начала текущего тарифа: ищем listing fee / пакетные
+       списания и операции, в названиях которых есть размещения/пакеты.
+    2) Старый Autoload v2 (пока ещё работает) — отчёты и fees, где Avito
+       документирует списания размещений из пакета.
+    """
+    if not start_timestamp:
+        print(
+            f"Placement scan v22 {account_key}: no tariff startTime",
+            flush=True,
+        )
+        return
+
+    tz = ZoneInfo(timezone_name)
+    start_dt = datetime.fromtimestamp(int(start_timestamp), tz)
+    now_dt = datetime.now(tz)
+
+    print(
+        f"Placement scan v22 {account_key}: "
+        f"period={start_dt.isoformat()}..{now_dt.isoformat()}",
+        flush=True,
+    )
+
+    # ---- 1. Operations history from tariff start ----
+    all_ops = []
+    cursor = start_dt
+    window_no = 0
+
+    while cursor < now_dt and window_no < 12:
+        window_end = min(cursor + timedelta(days=7), now_dt)
+        window_no += 1
+
+        try:
+            data = request_json(
+                "POST",
+                "/core/v1/accounts/operations_history/",
+                token=token,
+                data={
+                    "dateTimeFrom": cursor.isoformat(timespec="seconds"),
+                    "dateTimeTo": window_end.isoformat(timespec="seconds"),
+                },
+            )
+            payload = data.get("result") if isinstance(data, dict) else None
+            operations = (
+                payload.get("operations") or []
+                if isinstance(payload, dict)
+                else []
+            )
+            all_ops.extend(operations)
+            print(
+                f"Placement scan v22 {account_key}: "
+                f"operations window={window_no}, count={len(operations)}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"Placement scan v22 {account_key}: "
+                f"operations history error: {exc}",
+                flush=True,
+            )
+            break
+
+        cursor = window_end
+
+    service_counts = Counter(
+        str(op.get("serviceType") or "")
+        for op in all_ops
+        if isinstance(op, dict)
+    )
+    print(
+        f"Placement scan v22 {account_key}: "
+        f"service_counts={dict(service_counts)}",
+        flush=True,
+    )
+
+    interesting_ops = []
+    for op in all_ops:
+        if not isinstance(op, dict):
+            continue
+        service_type = str(op.get("serviceType") or "").casefold()
+        text = " ".join(
+            str(op.get(k) or "")
+            for k in ("serviceName", "operationName", "operationType")
+        ).casefold()
+
+        if (
+            service_type in {"lf", "tariff", "bundle"}
+            or "размещ" in text
+            or "пакет" in text
+        ):
+            interesting_ops.append(op)
+
+    print(
+        f"Placement scan v22 {account_key}: "
+        f"interesting_operations={len(interesting_ops)}",
+        flush=True,
+    )
+
+    for op in interesting_ops[:100]:
+        print(
+            f"Placement op {account_key}: "
+            f"updatedAt={op.get('updatedAt')!r}, "
+            f"serviceType={op.get('serviceType')!r}, "
+            f"serviceId={op.get('serviceId')!r}, "
+            f"itemId={op.get('itemId')!r}, "
+            f"amountRub={op.get('amountRub')!r}, "
+            f"amountTotal={op.get('amountTotal')!r}, "
+            f"serviceName={op.get('serviceName')!r}, "
+            f"operationType={op.get('operationType')!r}, "
+            f"operationName={op.get('operationName')!r}",
+            flush=True,
+        )
+
+    # ---- 2. Autoload v2 reports / fees ----
+    try:
+        reports_data = request_json(
+            "GET",
+            "/autoload/v2/reports?per_page=5&page=0",
+            token=token,
+        )
+        reports = reports_data.get("reports") or []
+        print(
+            f"Placement autoload v22 {account_key}: "
+            f"reports_count={len(reports)}, "
+            f"top_keys={list(reports_data.keys()) if isinstance(reports_data, dict) else []}",
+            flush=True,
+        )
+
+        for report in reports[:5]:
+            if isinstance(report, dict):
+                print(
+                    f"Placement autoload report {account_key}: {report!r}",
+                    flush=True,
+                )
+
+        report_id = _extract_report_id(reports[0]) if reports else None
+        if report_id is not None:
+            try:
+                detail = request_json(
+                    "GET",
+                    f"/autoload/v2/reports/{report_id}",
+                    token=token,
+                )
+                print(
+                    f"Placement autoload detail {account_key}: "
+                    f"report_id={report_id}, payload={detail!r}",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    f"Placement autoload detail {account_key}: "
+                    f"report_id={report_id}, error={exc}",
+                    flush=True,
+                )
+
+            try:
+                fees_data = request_json(
+                    "GET",
+                    f"/autoload/v2/reports/{report_id}/items/fees"
+                    "?per_page=200&page=0",
+                    token=token,
+                )
+                fees = fees_data.get("fees") or []
+                package_fees = [
+                    fee for fee in fees
+                    if isinstance(fee, dict)
+                    and fee.get("fees_type") == "package"
+                ]
+                package_ids = Counter(
+                    str(fee.get("fees_package_id"))
+                    for fee in package_fees
+                )
+                placements_spent = sum(
+                    int(fee.get("fees_amount") or 0)
+                    for fee in package_fees
+                    if isinstance(fee.get("fees_amount"), (int, float))
+                )
+
+                print(
+                    f"Placement autoload fees {account_key}: "
+                    f"report_id={report_id}, "
+                    f"fees_count={len(fees)}, "
+                    f"package_fees={len(package_fees)}, "
+                    f"placements_spent={placements_spent}, "
+                    f"package_ids={dict(package_ids)}",
+                    flush=True,
+                )
+
+                for fee in package_fees[:50]:
+                    print(
+                        f"Placement fee {account_key}: {fee!r}",
+                        flush=True,
+                    )
+            except Exception as exc:
+                print(
+                    f"Placement autoload fees {account_key}: "
+                    f"report_id={report_id}, error={exc}",
+                    flush=True,
+                )
+
+    except Exception as exc:
+        print(
+            f"Placement autoload v22 {account_key}: unavailable: {exc}",
+            flush=True,
+        )
+
+
 def get_tariff_details(account_key, token, timezone_name):
     now = time.time()
     cached = _tariff_cache.get(account_key)
@@ -287,6 +511,30 @@ def get_tariff_details(account_key, token, timezone_name):
 
     current = data.get("current") or {}
     scheduled = data.get("scheduled") or {}
+
+    current_packages = current.get("packages") or []
+    scheduled_packages = scheduled.get("packages") or []
+
+    print(
+        f"Tariff contract v22 {account_key}: "
+        f"current_level={current.get('level')!r}, "
+        f"current_start={current.get('startTime')!r}, "
+        f"current_close={current.get('closeTime')!r}, "
+        f"current_price={current.get('price')!r}, "
+        f"current_bonus={current.get('bonus')!r}, "
+        f"current_packages={len(current_packages)}, "
+        f"scheduled_level={scheduled.get('level')!r}, "
+        f"scheduled_start={scheduled.get('startTime')!r}, "
+        f"scheduled_price={scheduled.get('price')!r}, "
+        f"scheduled_packages={len(scheduled_packages)}",
+        flush=True,
+    )
+
+    for idx, package in enumerate(scheduled_packages, start=1):
+        print(
+            f"Tariff scheduled package {account_key} #{idx}: {package!r}",
+            flush=True,
+        )
 
     placements_remaining = None
     packages = current.get("packages") or []
@@ -352,6 +600,20 @@ def get_tariff_details(account_key, token, timezone_name):
         f"next={next_tariff!r}",
         flush=True,
     )
+
+    if account_key in {"nm_orange", "nm_blue"}:
+        try:
+            diagnose_placement_usage(
+                account_key,
+                token,
+                timezone_name,
+                current.get("startTime"),
+            )
+        except Exception as exc:
+            print(
+                f"Placement scan v22 {account_key}: fatal diagnostic error: {exc}",
+                flush=True,
+            )
 
     _tariff_cache[account_key] = {
         "value": value,

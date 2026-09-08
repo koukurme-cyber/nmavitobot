@@ -26,7 +26,8 @@ CACHE_PATH = DATA_DIR / "status_cache.json"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 _refresh_lock = threading.Lock()
-APP_VERSION = "v20"
+_keyboard_cleared_chats = set()
+APP_VERSION = "v22"
 
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -193,9 +194,12 @@ def _edit_status_message(chat_id, message_id, data, fetched_at):
                 "disable_web_page_preview": "true",
             },
         )
+        return True
     except Exception as exc:
-        if "message is not modified" not in str(exc).lower():
-            print("BACKGROUND EDIT ERROR:", exc, flush=True)
+        if "message is not modified" in str(exc).lower():
+            return True
+        print("BACKGROUND EDIT ERROR:", exc, flush=True)
+        return False
 
 
 def refresh_status_message(chat_id, message_id):
@@ -209,19 +213,29 @@ def refresh_status_message(chat_id, message_id):
         data = get_financial_status(CONFIG)
         fetched_at = datetime.now(ZoneInfo(tz_name)).strftime("%d.%m.%Y %H:%M")
         save_cached_status(data, fetched_at)
-        _edit_status_message(chat_id, message_id, data, fetched_at)
-        print("Telegram updated after financial phase", flush=True)
+        financial_edit_ok = _edit_status_message(
+            chat_id, message_id, data, fetched_at
+        )
+        if financial_edit_ok:
+            print("Telegram updated after financial phase", flush=True)
 
         # Этап 2: медленно пересчитываем объявления и обновляем то же сообщение ещё раз.
         data = enrich_status_with_items(data, CONFIG)
         fetched_at = datetime.now(ZoneInfo(tz_name)).strftime("%d.%m.%Y %H:%M")
         save_cached_status(data, fetched_at)
-        _edit_status_message(chat_id, message_id, data, fetched_at)
-        print("Telegram updated after ads phase", flush=True)
+
+        if financial_edit_ok:
+            ads_edit_ok = _edit_status_message(
+                chat_id, message_id, data, fetched_at
+            )
+            if ads_edit_ok:
+                print("Telegram updated after ads phase", flush=True)
 
     except Exception as exc:
         print("BACKGROUND REFRESH ERROR:", exc, flush=True)
     finally:
+        # Удаляем итоговый статус через 10 минут после завершения обновления.
+        delete_message_later(chat_id, message_id, delay=600)
         _refresh_lock.release()
 
 
@@ -249,7 +263,30 @@ def start_background_refresh(chat_id, message_id):
     thread.start()
 
 
+def remove_legacy_keyboard(chat_id):
+    # ReplyKeyboardRemove нельзя прикреплять к сообщению, которое потом
+    # редактируется через editMessageText. Поэтому старую клавиатуру
+    # убираем отдельным временным сообщением.
+    if chat_id in _keyboard_cleared_chats:
+        return
+
+    try:
+        temp = telegram_api(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": "Обновляю статус…",
+                "reply_markup": json.dumps({"remove_keyboard": True}),
+            },
+        )
+        _keyboard_cleared_chats.add(chat_id)
+        delete_message_later(chat_id, temp["message_id"], delay=1)
+    except Exception as exc:
+        print("KEYBOARD REMOVE ERROR:", exc, flush=True)
+
+
 def send_status(chat_id):
+    remove_legacy_keyboard(chat_id)
     cached = load_cached_status()
 
     if cached:
@@ -264,11 +301,9 @@ def send_status(chat_id):
             "text": text,
             "parse_mode": "HTML",
             "disable_web_page_preview": "true",
-            "reply_markup": json.dumps({"remove_keyboard": True}),
         },
     )
 
-    delete_message_later(chat_id, message["message_id"], delay=600)
     start_background_refresh(chat_id, message["message_id"])
 
 
