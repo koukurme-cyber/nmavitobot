@@ -27,7 +27,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 _refresh_lock = threading.Lock()
 _keyboard_cleared_chats = set()
-APP_VERSION = "v30"
+MESSAGE_TTL_SECONDS = 20 * 60
+APP_VERSION = "v31"
 
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -438,9 +439,9 @@ def refresh_query_message(chat_id, message_id, mode="full", seller_key=None):
             except Exception as edit_exc:
                 print("ERROR EDIT ERROR:", edit_exc, flush=True)
         finally:
-            delete_message_later(chat_id, message_id, delay=600)
+            delete_message_later(chat_id, message_id, delay=MESSAGE_TTL_SECONDS)
 
-def delete_message_later(chat_id, message_id, delay=600):
+def delete_message_later(chat_id, message_id, delay=MESSAGE_TTL_SECONDS):
     def delete():
         try:
             telegram_api(
@@ -568,15 +569,28 @@ def handle_update(update):
 
     command = text.split(maxsplit=1)[0].split("@", 1)[0].casefold()
 
+    # Удаляем и саму команду пользователя через 20 минут.
+    # В личном чате это работает штатно; в группе боту нужны права на удаление.
+    delete_message_later(
+        chat_id,
+        message["message_id"],
+        delay=MESSAGE_TTL_SECONDS,
+    )
+
     # /start оставляем только как вход в бота; он показывает список команд.
     if command == "/start":
-        telegram_api(
+        help_message = telegram_api(
             "sendMessage",
             {
                 "chat_id": chat_id,
                 "text": _commands_help(),
                 "parse_mode": "HTML",
             },
+        )
+        delete_message_later(
+            chat_id,
+            help_message["message_id"],
+            delay=MESSAGE_TTL_SECONDS,
         )
         return
 
@@ -586,13 +600,18 @@ def handle_update(update):
         return
 
     if command in {"/help", "/commands"}:
-        telegram_api(
+        help_message = telegram_api(
             "sendMessage",
             {
                 "chat_id": chat_id,
                 "text": _commands_help(),
                 "parse_mode": "HTML",
             },
+        )
+        delete_message_later(
+            chat_id,
+            help_message["message_id"],
+            delay=MESSAGE_TTL_SECONDS,
         )
 
 
