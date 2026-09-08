@@ -171,3 +171,21 @@
 Если `value` найдётся, можно будет получать остаток без браузерной сессии.
 Если страница редиректит на логин или плитка отсутствует, значит этот способ
 требует веб-сессию Avito и API OAuth недостаточен.
+
+
+## v24: прямой тест внутреннего endpoint Sidebar
+
+Из реального `Sidebar.7bb4dfa571e8168b.js` найден источник `initialToolsState`:
+
+- `POST /web/2/profileinfo`
+- тело: `{"isPro": true}`
+- ответ используется как `initialToolsState.data`
+- из ответа Sidebar берёт `profile`, `stats`, `tiles`, `agency`, `banner`
+
+v24 проверяет этот endpoint для `nm_orange` и `nm_blue`
+с обычным API OAuth Bearer-токеном, без browser cookies.
+
+Ищите в логах:
+`Web profileinfo v24 nm_orange: ...`
+и
+`Web profileinfo v24 nm_blue: ...`

@@ -490,6 +490,95 @@ def diagnose_placement_usage(account_key, token, timezone_name, start_timestamp)
 
 
 
+
+def diagnose_web_profileinfo(account_key, token):
+    """
+    Проверяет внутренний web-endpoint Avito, который в коде Sidebar
+    используется для initialToolsState и tiles:
+    POST /web/2/profileinfo
+    """
+    url = "https://www.avito.ru/web/2/profileinfo"
+    payload = json.dumps({"isPro": True}).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+    }
+
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers=headers,
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read()
+            final_url = response.geturl()
+            content_type = response.headers.get("Content-Type", "")
+            status = getattr(response, "status", None)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        print(
+            f"Web profileinfo v24 {account_key}: "
+            f"HTTP {exc.code}, url={exc.geturl()!r}, "
+            f"content_type={exc.headers.get('Content-Type', '')!r}, "
+            f"body_prefix={body[:500]!r}",
+            flush=True,
+        )
+        return None
+    except Exception as exc:
+        print(
+            f"Web profileinfo v24 {account_key}: request failed: {exc}",
+            flush=True,
+        )
+        return None
+
+    text = raw.decode("utf-8", errors="replace")
+
+    try:
+        data = json.loads(text)
+    except Exception:
+        print(
+            f"Web profileinfo v24 {account_key}: "
+            f"status={status}, final_url={final_url!r}, "
+            f"content_type={content_type!r}, json=False, "
+            f"body_prefix={text[:500]!r}",
+            flush=True,
+        )
+        return None
+
+    top_keys = list(data.keys()) if isinstance(data, dict) else []
+    tiles = data.get("tiles") if isinstance(data, dict) else None
+    tile_summary = []
+
+    if isinstance(tiles, list):
+        for tile in tiles:
+            if isinstance(tile, dict):
+                tile_summary.append({
+                    "title": tile.get("title"),
+                    "value": tile.get("value"),
+                    "route": tile.get("route"),
+                })
+
+    remain = None
+    for tile in tile_summary:
+        if tile.get("title") == "Остаток размещений":
+            remain = tile.get("value")
+            break
+
+    print(
+        f"Web profileinfo v24 {account_key}: "
+        f"status={status}, final_url={final_url!r}, "
+        f"content_type={content_type!r}, top_keys={top_keys}, "
+        f"tiles={tile_summary}, remain={remain!r}",
+        flush=True,
+    )
+    return remain
+
+
 def diagnose_web_tariff_tile(account_key, token):
     """
     Проверяет, отдаёт ли веб-страница Avito Pro плитку
@@ -678,6 +767,14 @@ def get_tariff_details(account_key, token, timezone_name):
     )
 
     if account_key in {"nm_orange", "nm_blue"}:
+        try:
+            diagnose_web_profileinfo(account_key, token)
+        except Exception as exc:
+            print(
+                f"Web profileinfo v24 {account_key}: fatal diagnostic error: {exc}",
+                flush=True,
+            )
+
         try:
             diagnose_web_tariff_tile(account_key, token)
         except Exception as exc:
