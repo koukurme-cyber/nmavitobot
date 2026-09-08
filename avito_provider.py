@@ -1,5 +1,7 @@
 import json
+import html as html_module
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -487,6 +489,80 @@ def diagnose_placement_usage(account_key, token, timezone_name, start_timestamp)
         )
 
 
+
+def diagnose_web_tariff_tile(account_key, token):
+    """
+    Проверяет, отдаёт ли веб-страница Avito Pro плитку
+    «Остаток размещений» при авторизации только OAuth Bearer-токеном API.
+    Никакие cookies браузера не используются.
+    """
+    url = "https://www.avito.ru/professionals/tariff"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "text/html,application/xhtml+xml",
+        "User-Agent": "Mozilla/5.0",
+    }
+
+    request = urllib.request.Request(url, headers=headers, method="GET")
+
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read()
+            final_url = response.geturl()
+            content_type = response.headers.get("Content-Type", "")
+            status = getattr(response, "status", None)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        print(
+            f"Web tariff v23 {account_key}: "
+            f"HTTP {exc.code}, url={exc.geturl()!r}, "
+            f"body_prefix={body[:300]!r}",
+            flush=True,
+        )
+        return None
+    except Exception as exc:
+        print(
+            f"Web tariff v23 {account_key}: request failed: {exc}",
+            flush=True,
+        )
+        return None
+
+    text = raw.decode("utf-8", errors="replace")
+    decoded = html_module.unescape(text)
+
+    patterns = [
+        r'"title":"Остаток размещений","value":"([^"]+)"',
+        r'"title"\s*:\s*"Остаток размещений"\s*,\s*"value"\s*:\s*"([^"]+)"',
+    ]
+
+    value = None
+    for pattern in patterns:
+        match = re.search(pattern, decoded)
+        if match:
+            value = match.group(1)
+            break
+
+    has_tile_text = "Остаток размещений" in decoded
+
+    print(
+        f"Web tariff v23 {account_key}: "
+        f"status={status}, final_url={final_url!r}, "
+        f"content_type={content_type!r}, html_len={len(text)}, "
+        f"has_tile_text={has_tile_text}, value={value!r}",
+        flush=True,
+    )
+
+    if has_tile_text and value is None:
+        pos = decoded.find("Остаток размещений")
+        snippet = decoded[max(0, pos - 250):pos + 500]
+        print(
+            f"Web tariff v23 {account_key}: tile snippet={snippet!r}",
+            flush=True,
+        )
+
+    return value
+
+
 def get_tariff_details(account_key, token, timezone_name):
     now = time.time()
     cached = _tariff_cache.get(account_key)
@@ -602,6 +678,14 @@ def get_tariff_details(account_key, token, timezone_name):
     )
 
     if account_key in {"nm_orange", "nm_blue"}:
+        try:
+            diagnose_web_tariff_tile(account_key, token)
+        except Exception as exc:
+            print(
+                f"Web tariff v23 {account_key}: fatal diagnostic error: {exc}",
+                flush=True,
+            )
+
         try:
             diagnose_placement_usage(
                 account_key,
