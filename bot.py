@@ -26,6 +26,7 @@ CACHE_PATH = DATA_DIR / "status_cache.json"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 _refresh_lock = threading.Lock()
+APP_VERSION = "v17"
 
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -72,11 +73,6 @@ def seller_block(seller):
 
     rows.append(f"Кошелёк: <b>{html.escape(money(seller.get('wallet')))}</b>")
 
-    if seller.get("subscription_name"):
-        rows.append(
-            f"Подписка: <b>{html.escape(str(seller['subscription_name']))}</b>"
-        )
-
     if seller.get("financial_mode") == "placements":
         if seller.get("placements_remaining") is not None:
             rows.append(
@@ -112,10 +108,10 @@ def seller_block(seller):
         amount = next_tariff.get("amount")
         if date and amount is not None:
             rows.append(
-                f"Следующий тариф: <b>{html.escape(str(date))} — {html.escape(money(amount))}</b>"
+                f"Следующий платёж: <b>{html.escape(str(date))} — {html.escape(money(amount))}</b>"
             )
         elif date:
-            rows.append(f"Следующий тариф с: <b>{html.escape(str(date))}</b>")
+            rows.append(f"Следующий платёж: <b>{html.escape(str(date))}</b>")
 
     warnings = seller.get("warnings") or []
     if warnings and any("429" in warning for warning in warnings):
@@ -268,7 +264,7 @@ def handle_update(update):
 
 
 def main():
-    print("Bot started", flush=True)
+    print(f"Bot started {APP_VERSION}", flush=True)
 
     try:
         telegram_api("deleteWebhook", {"drop_pending_updates": "false"})

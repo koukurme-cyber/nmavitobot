@@ -4,7 +4,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 BASE_URL = "https://api.avito.ru"
@@ -13,6 +13,7 @@ _token_cache = {}
 _advance_cache = {}
 _items_cache = {}
 _tariff_cache = {}
+_subscription_ops_cache = {}
 
 
 def env(name):
@@ -336,6 +337,102 @@ def get_tariff_details(account_key, token, timezone_name):
     return value
 
 
+
+def get_subscription_operations(account_key, token, timezone_name):
+    """
+    Диагностика CPA-подписок через историю операций.
+    Ничего не выводит пользователю: только пишет в лог найденные операции,
+    чтобы определить, где Avito хранит дату/период подписки.
+    """
+    now = time.time()
+    cached = _subscription_ops_cache.get(account_key)
+
+    if cached and cached["expires_at"] > now:
+        return cached["value"]
+
+    tz = ZoneInfo(timezone_name)
+    end_dt = datetime.now(tz)
+    found = []
+
+    print(f"Subscription scan v17 {account_key}: started", flush=True)
+
+    # API истории принимает окно не больше недели.
+    # Берём последние 35 дней.
+    for window in range(5):
+        window_end = end_dt - timedelta(days=7 * window)
+        window_start = window_end - timedelta(days=7)
+
+        body = {
+            "dateTimeFrom": window_start.isoformat(timespec="seconds"),
+            "dateTimeTo": window_end.isoformat(timespec="seconds"),
+        }
+
+        try:
+            data = request_json(
+                "POST",
+                "/core/v1/accounts/operations_history/",
+                token=token,
+                data=body,
+            )
+        except Exception as exc:
+            print(
+                f"Subscription history unavailable for {account_key}: {exc}",
+                flush=True,
+            )
+            break
+
+        payload = data.get("result") if isinstance(data, dict) else None
+        if isinstance(payload, dict):
+            operations = payload.get("operations") or []
+        else:
+            operations = data.get("operations") or [] if isinstance(data, dict) else []
+
+        print(
+            f"Subscription scan v17 {account_key}: "
+            f"window={window + 1}, operations={len(operations)}",
+            flush=True,
+        )
+        for op in operations:
+            service_type = str(op.get("serviceType") or "").casefold()
+            service_name = str(op.get("serviceName") or "")
+            operation_name = str(op.get("operationName") or "")
+            haystack = f"{service_type} {service_name} {operation_name}".casefold()
+
+            if service_type == "subscription" or "подпис" in haystack:
+                found.append(op)
+
+    def op_date(op):
+        return str(op.get("paidAt") or op.get("updatedAt") or "")
+
+    found.sort(key=op_date, reverse=True)
+
+    if found:
+        for op in found[:10]:
+            print(
+                "Subscription operation "
+                f"{account_key}: "
+                f"paidAt={op.get('paidAt')!r}, "
+                f"updatedAt={op.get('updatedAt')!r}, "
+                f"serviceType={op.get('serviceType')!r}, "
+                f"serviceName={op.get('serviceName')!r}, "
+                f"operationType={op.get('operationType')!r}, "
+                f"amountRub={op.get('amountRub')!r}, "
+                f"operationName={op.get('operationName')!r}",
+                flush=True,
+            )
+    else:
+        print(
+            f"Subscription operations {account_key}: none found in last 35 days",
+            flush=True,
+        )
+
+    _subscription_ops_cache[account_key] = {
+        "value": found,
+        "expires_at": now + 21600,
+    }
+    return found
+
+
 def get_seller_finances(seller, timezone_name):
     key = seller["key"]
     prefix = seller["env_prefix"]
@@ -376,6 +473,14 @@ def get_seller_finances(seller, timezone_name):
             result["advance"] = get_advance(key, token)
         except Exception as exc:
             result["warnings"].append(f"аванс: {exc}")
+
+        try:
+            get_subscription_operations(key, token, timezone_name)
+        except Exception as exc:
+            print(
+                f"Subscription diagnostic failed for {key}: {exc}",
+                flush=True,
+            )
 
     # /tariff/info/1 подходит для транспортного тарифа.
     # Для CPA-аккаунтов (advance) он возвращает 404 и не описывает их подписку,
