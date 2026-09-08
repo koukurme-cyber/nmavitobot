@@ -7,7 +7,8 @@
       "env_prefix": "AVITO_AGGREGATY",
       "financial_mode": "advance",
       "subscription_name": "Максимальная",
-      "subscription_period_days": 30
+      "subscription_period_days": 30,
+      "short_name": "Агрегаты"
     },
     {
       "key": "avmex",
@@ -15,19 +16,22 @@
       "env_prefix": "AVITO_AVMEX",
       "financial_mode": "advance",
       "subscription_name": "Расширенная",
-      "subscription_period_days": 30
+      "subscription_period_days": 30,
+      "short_name": "Авмекс"
     },
     {
       "key": "nm_orange",
       "name": "Надёжные Машины (оранжевые)",
       "env_prefix": "AVITO_NM_ORANGE",
-      "financial_mode": "placements"
+      "financial_mode": "placements",
+      "short_name": "НМ оранж."
     },
     {
       "key": "nm_blue",
       "name": "Надёжные машины (синие)",
       "env_prefix": "AVITO_NM_BLUE",
-      "financial_mode": "placements"
+      "financial_mode": "placements",
+      "short_name": "НМ синие"
     },
     {
       "key": "tir",
@@ -35,7 +39,8 @@
       "env_prefix": "AVITO_TIR",
       "financial_mode": "advance",
       "subscription_name": "Расширенная",
-      "subscription_period_days": 30
+      "subscription_period_days": 30,
+      "short_name": "ТИР"
     }
   ]
 }

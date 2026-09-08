@@ -573,6 +573,7 @@ def get_seller_finances(seller, timezone_name):
     result = {
         "key": key,
         "name": seller["name"],
+        "short_name": seller.get("short_name"),
         "financial_mode": financial_mode,
         "subscription_name": seller.get("subscription_name"),
         "subscription_end": None,
@@ -658,6 +659,7 @@ def _financial_error_result(seller, exc):
     return {
         "key": seller["key"],
         "name": seller["name"],
+        "short_name": seller.get("short_name"),
         "financial_mode": seller.get("financial_mode", "advance"),
         "subscription_name": seller.get("subscription_name"),
         "subscription_end": None,
@@ -731,6 +733,49 @@ def enrich_status_with_items(data, config):
     print("Items collection completed", flush=True)
     return data
 
+
+
+def _items_only_result(seller):
+    return {
+        "key": seller["key"],
+        "name": seller["name"],
+        "short_name": seller.get("short_name"),
+        "financial_mode": seller.get("financial_mode", "advance"),
+        "wallet": None,
+        "advance": None,
+        "placements_remaining": None,
+        "subscription_end": None,
+        "subscription_next_payment": None,
+        "tariff_end": None,
+        "next_tariff": None,
+        "ads": {},
+        "ads_pending": True,
+        "warnings": [],
+    }
+
+
+def get_items_status(config):
+    """Собрать только статусы объявлений, без кошелька/тарифов/истории операций."""
+    seller_configs = list(config["sellers"])
+    results = [_items_only_result(seller) for seller in seller_configs]
+    workers = max(1, min(len(results), 5))
+
+    if results:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="avito-items-only") as pool:
+            jobs = {
+                pool.submit(add_seller_items, result, seller): index
+                for index, (result, seller) in enumerate(zip(results, seller_configs))
+            }
+            for future in as_completed(jobs):
+                index = jobs[future]
+                try:
+                    results[index] = future.result()
+                except Exception as exc:
+                    results[index]["ads_pending"] = False
+                    results[index]["error"] = str(exc)
+
+    print("Items-only collection completed", flush=True)
+    return {"sellers": results, "phase": "complete"}
 
 def get_status(config):
     data = get_financial_status(config)
