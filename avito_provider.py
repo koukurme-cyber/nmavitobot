@@ -20,7 +20,15 @@ def env(name):
     return value
 
 
-def request_json(method, path, token=None, data=None, headers=None, timeout=25):
+def request_json(
+    method,
+    path,
+    token=None,
+    data=None,
+    headers=None,
+    timeout=25,
+    max_retries=4,
+):
     request_headers = {"Accept": "application/json"}
 
     if token:
@@ -38,20 +46,41 @@ def request_json(method, path, token=None, data=None, headers=None, timeout=25):
             request_headers.setdefault("Content-Type", "application/json")
             body = json.dumps(data).encode("utf-8")
 
-    request = urllib.request.Request(
-        BASE_URL + path,
-        data=body,
-        headers=request_headers,
-        method=method,
-    )
+    for attempt in range(max_retries + 1):
+        request = urllib.request.Request(
+            BASE_URL + path,
+            data=body,
+            headers=request_headers,
+            method=method,
+        )
 
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8")
-            return json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Avito API {exc.code}: {raw[:500]}") from exc
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read().decode("utf-8")
+                return json.loads(raw) if raw else {}
+
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+
+            if exc.code == 429 and attempt < max_retries:
+                retry_after = exc.headers.get("Retry-After")
+                try:
+                    wait_seconds = float(retry_after) if retry_after else 0
+                except (TypeError, ValueError):
+                    wait_seconds = 0
+
+                if wait_seconds <= 0:
+                    # Мягкий backoff: 2, 4, 6, 8 секунды.
+                    wait_seconds = 2 * (attempt + 1)
+
+                print(
+                    f"Avito 429 for {path}; retry in {wait_seconds:.1f}s "
+                    f"({attempt + 1}/{max_retries})"
+                )
+                time.sleep(wait_seconds)
+                continue
+
+            raise RuntimeError(f"Avito API {exc.code}: {raw[:500]}") from exc
 
 
 def get_token(account_key, client_id, client_secret):
@@ -165,6 +194,10 @@ def get_items_counts(token):
 
         if len(items) < per_page:
             break
+
+        # Не штурмуем API страницами подряд: у крупных аккаунтов это
+        # быстро приводит к 429.
+        time.sleep(0.35)
 
         page += 1
 
