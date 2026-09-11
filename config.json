@@ -31,7 +31,9 @@
       "name": "Надёжные машины (синие)",
       "env_prefix": "AVITO_NM_BLUE",
       "financial_mode": "placements",
-      "short_name": "НМ синие"
+      "short_name": "НМ синие",
+      "payment_date_seed": "09.09.2026",
+      "payment_amount_seed": 8016
     },
     {
       "key": "tir",

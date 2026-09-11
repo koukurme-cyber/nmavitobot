@@ -23,12 +23,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 DATA_DIR = Path(os.getenv("DATA_DIR", os.path.join(BASE_DIR, "data")))
 CACHE_PATH = DATA_DIR / "status_cache.json"
+PAYMENT_STATE_PATH = DATA_DIR / "payment_state.json"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 _refresh_lock = threading.Lock()
 _keyboard_cleared_chats = set()
 MESSAGE_TTL_SECONDS = 20 * 60
-APP_VERSION = "v32"
+APP_VERSION = "v34"
 
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -179,12 +180,204 @@ def _updated_line(fetched_at=None):
 
 
 
+
+def _parse_payment_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value), "%d.%m.%Y").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_payment_state():
+    try:
+        if not PAYMENT_STATE_PATH.exists():
+            return {}
+        with PAYMENT_STATE_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        print("PAYMENT STATE READ ERROR:", exc, flush=True)
+        return {}
+
+
+def _save_payment_state(state):
+    tmp_path = PAYMENT_STATE_PATH.with_suffix(".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        tmp_path.replace(PAYMENT_STATE_PATH)
+    except Exception as exc:
+        print("PAYMENT STATE WRITE ERROR:", exc, flush=True)
+
+
+def _bootstrap_payment_state_from_status_cache(state):
+    # При первом запуске v33 пытаемся забрать даты из старого status_cache.json.
+    cached = load_cached_status()
+    if not cached:
+        return state
+
+    changed = False
+    for seller in (cached.get("data") or {}).get("sellers") or []:
+        if not isinstance(seller, dict):
+            continue
+
+        key = seller.get("key")
+        if not key or key in state:
+            continue
+
+        payment = seller.get("subscription_next_payment") or seller.get("next_tariff")
+        if not isinstance(payment, dict) or not payment.get("date"):
+            continue
+
+        state[key] = {
+            "date": payment.get("date"),
+            "amount": payment.get("amount"),
+            "source": "status_cache",
+        }
+        changed = True
+
+    if changed:
+        _save_payment_state(state)
+
+    return state
+
+
+def _seller_config_by_key(key):
+    for seller in CONFIG.get("sellers", []):
+        if seller.get("key") == key:
+            return seller
+    return {}
+
+
+def _apply_payment_dates(data):
+    """
+    Устойчивое отображение даты регулярного платежа.
+
+    Если Avito отдаёт дату — сохраняем её.
+    Если дата временно исчезла — используем последнюю известную.
+    Если известная дата уже прошла, а новой даты/операции нет —
+    показываем "Платёж не подтверждён".
+    """
+    state = _bootstrap_payment_state_from_status_cache(_load_payment_state())
+    tz_name = CONFIG.get("timezone", "Europe/Moscow")
+    today = datetime.now(ZoneInfo(tz_name)).date()
+    changed = False
+
+    for seller in data.get("sellers", []):
+        if not isinstance(seller, dict) or seller.get("error"):
+            continue
+
+        key = seller.get("key")
+        mode = seller.get("financial_mode")
+        payment_key = (
+            "next_tariff"
+            if mode == "placements"
+            else "subscription_next_payment"
+        )
+
+        payment = seller.get(payment_key)
+        if not isinstance(payment, dict):
+            payment = {}
+
+        api_date = payment.get("date")
+        api_amount = payment.get("amount")
+        stored = state.get(key) if isinstance(state.get(key), dict) else {}
+        config = _seller_config_by_key(key)
+
+        # Новая дата из API всегда заменяет сохранённую.
+        if api_date:
+            if (
+                stored.get("date") != api_date
+                or (
+                    api_amount is not None
+                    and stored.get("amount") != api_amount
+                )
+            ):
+                state[key] = {
+                    "date": api_date,
+                    "amount": api_amount,
+                    "source": "api",
+                }
+                stored = state[key]
+                changed = True
+
+        else:
+            fallback_date = stored.get("date")
+            fallback_amount = stored.get("amount")
+
+            # Миграционный seed используется только когда истории ещё нет,
+            # а Avito уже перестал отдавать дату.
+            if not fallback_date:
+                seed = config.get("payment_date_seed")
+                if seed:
+                    fallback_date = seed
+                    fallback_amount = (
+                        api_amount
+                        if api_amount is not None
+                        else config.get("payment_amount_seed")
+                    )
+                    state[key] = {
+                        "date": fallback_date,
+                        "amount": fallback_amount,
+                        "source": "seed",
+                    }
+                    stored = state[key]
+                    changed = True
+
+            if fallback_date:
+                payment = dict(payment)
+                payment["date"] = fallback_date
+                if api_amount is None and fallback_amount is not None:
+                    payment["amount"] = fallback_amount
+                payment["date_fallback"] = True
+                seller[payment_key] = payment
+
+        effective = seller.get(payment_key)
+        if isinstance(effective, dict):
+            effective_date = effective.get("date")
+            effective_amount = effective.get("amount")
+
+            if effective_date and key in state:
+                if (
+                    effective_amount is not None
+                    and state[key].get("amount") != effective_amount
+                ):
+                    state[key]["amount"] = effective_amount
+                    changed = True
+
+            due = _parse_payment_date(effective_date)
+            if due:
+                days_left = (due - today).days
+                if days_left < 0:
+                    effective["payment_status"] = "unconfirmed"
+                elif days_left <= 3:
+                    effective["payment_status"] = "soon"
+                else:
+                    effective["payment_status"] = "normal"
+
+        print(
+            f"Payment date v33 {key}: "
+            f"api_date={api_date!r}, "
+            f"effective={seller.get(payment_key)!r}, "
+            f"stored={state.get(key)!r}",
+            flush=True,
+        )
+
+    if changed:
+        _save_payment_state(state)
+
+    return data
+
+
 def _regular_payment_line(payment):
     if not isinstance(payment, dict) or not payment:
         return None
 
     date = payment.get("date")
     amount = payment.get("amount")
+    status = payment.get("payment_status")
 
     parts = []
     if date:
@@ -197,20 +390,13 @@ def _regular_payment_line(payment):
     if not parts:
         return None
 
+    if status == "unconfirmed":
+        return f"🔴 <b>Платёж не подтверждён: {' '.join(parts)}</b>"
+
     text = "Регулярный платёж: " + " ".join(parts)
 
-    # Telegram Bot API не поддерживает цвет текста в HTML.
-    # Поэтому для близкой даты используем красный маркер + жирный текст.
-    if date:
-        try:
-            due = datetime.strptime(str(date), "%d.%m.%Y").date()
-            tz_name = CONFIG.get("timezone", "Europe/Moscow")
-            today = datetime.now(ZoneInfo(tz_name)).date()
-            days_left = (due - today).days
-            if days_left <= 3:
-                return f"🔴 <b>{text}</b>"
-        except Exception:
-            pass
+    if status == "soon":
+        return f"🔴 <b>{text}</b>"
 
     return text
 
@@ -297,21 +483,21 @@ def _seller_ads_block(seller):
 
 
 def render_status(data, fetched_at=None):
-    blocks = ["<b>Авито</b>"]
+    blocks = ["<b>АВИТО</b>"]
     blocks.extend(_seller_full_block(seller) for seller in data["sellers"])
     blocks.append(_updated_line(fetched_at))
     return "\n\n".join(blocks)
 
 
 def render_balances(data, fetched_at=None):
-    blocks = ["<b>Авито · баланс</b>"]
+    blocks = ["<b>АВИТО · БАЛАНС</b>"]
     blocks.extend(_seller_balance_block(seller) for seller in data["sellers"])
     blocks.append(_updated_line(fetched_at))
     return "\n\n".join(blocks)
 
 
 def render_ads(data, fetched_at=None):
-    blocks = ["<b>Авито · объявления</b>"]
+    blocks = ["<b>АВИТО · ОБЪЯВЛЕНИЯ</b>"]
     blocks.extend(_seller_ads_block(seller) for seller in data["sellers"])
     blocks.append(_updated_line(fetched_at))
     return "\n\n".join(blocks)
@@ -319,7 +505,7 @@ def render_ads(data, fetched_at=None):
 
 def render_account(data, fetched_at=None):
     return "\n\n".join([
-        "<b>Авито</b>",
+        "<b>АВИТО</b>",
         _seller_full_block(data["sellers"][0]),
         _updated_line(fetched_at),
     ])
@@ -327,7 +513,7 @@ def render_account(data, fetched_at=None):
 
 def render_account_balance(data, fetched_at=None):
     return "\n\n".join([
-        "<b>Авито · баланс</b>",
+        "<b>АВИТО · БАЛАНС</b>",
         _seller_balance_block(data["sellers"][0]),
         _updated_line(fetched_at),
     ])
@@ -335,7 +521,7 @@ def render_account_balance(data, fetched_at=None):
 
 def render_account_ads(data, fetched_at=None):
     return "\n\n".join([
-        "<b>Авито · объявления</b>",
+        "<b>АВИТО · ОБЪЯВЛЕНИЯ</b>",
         _seller_ads_block(data["sellers"][0]),
         _updated_line(fetched_at),
     ])
@@ -416,6 +602,9 @@ def refresh_query_message(chat_id, message_id, mode="full", seller_key=None):
                 data = get_status(query_config)
                 renderer = render_account if seller_key else render_status
 
+            if mode != "ads":
+                data = _apply_payment_dates(data)
+
             fetched_at = datetime.now(ZoneInfo(tz_name)).strftime("%d.%m.%Y %H:%M")
 
             # Постоянный кэш обновляем только полным общим /status.
@@ -434,7 +623,7 @@ def refresh_query_message(chat_id, message_id, mode="full", seller_key=None):
                 _edit_result_message(
                     chat_id,
                     message_id,
-                    "<b>Авито</b>\n\nНе удалось получить актуальные данные.",
+                    "<b>АВИТО</b>\n\nНе удалось получить актуальные данные.",
                 )
             except Exception as edit_exc:
                 print("ERROR EDIT ERROR:", edit_exc, flush=True)
@@ -549,7 +738,7 @@ def send_query(chat_id, mode="full", seller_key=None):
         "sendMessage",
         {
             "chat_id": chat_id,
-            "text": f"<b>Авито</b>\n\n{labels.get(mode, labels['full'])}",
+            "text": f"<b>АВИТО</b>\n\n{labels.get(mode, labels['full'])}",
             "parse_mode": "HTML",
             "disable_web_page_preview": "true",
         },
