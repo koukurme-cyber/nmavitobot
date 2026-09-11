@@ -28,7 +28,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 _refresh_lock = threading.Lock()
 _keyboard_cleared_chats = set()
 MESSAGE_TTL_SECONDS = 20 * 60
-APP_VERSION = "v31"
+APP_VERSION = "v32"
 
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:

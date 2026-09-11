@@ -366,10 +366,16 @@ def get_tariff_details(account_key, token, timezone_name):
 
     next_tariff = None
     if scheduled:
+        # Avito иногда оставляет scheduled.startTime пустым после даты продления,
+        # хотя цена следующего периода продолжает приходить.
+        # В таком случае дата регулярного платежа = closeTime текущего периода.
         start_date = _format_unix_date(
             scheduled.get("startTime"),
             timezone_name,
         )
+        if not start_date:
+            start_date = tariff_end
+
         amount = (scheduled.get("price") or {}).get("price")
         if start_date or amount is not None:
             next_tariff = {
