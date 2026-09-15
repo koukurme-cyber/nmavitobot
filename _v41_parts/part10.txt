@@ -1,0 +1,228 @@
+    message_id = message.get("message_id")
+    if chat_id is None or message_id is None:
+        return
+
+    try:
+        minutes = int(data.split(":", 1)[1])
+    except Exception:
+        return
+
+    if minutes < 0 or minutes > 10080:
+        return
+
+    all_settings, settings = _get_chat_notify_settings(chat_id)
+    settings["delete_after_minutes"] = minutes
+    all_settings[str(chat_id)] = settings
+    _save_notify_settings(all_settings)
+
+    # Пересчитываем срок удаления самого экрана настройки уже по новому значению.
+    delete_message_later(chat_id, message_id)
+
+    try:
+        telegram_api(
+            "answerCallbackQuery",
+            {"callback_query_id": callback["id"]},
+        )
+    except Exception:
+        pass
+
+    try:
+        telegram_api(
+            "editMessageText",
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": _delete_after_text(settings),
+                "parse_mode": "HTML",
+                "reply_markup": json.dumps(
+                    _delete_after_keyboard(settings),
+                    ensure_ascii=False,
+                ),
+            },
+        )
+    except Exception as exc:
+        if "message is not modified" not in str(exc).lower():
+            print("DELETE SETTINGS EDIT ERROR:", exc, flush=True)
+
+
+ACCOUNT_COMMAND_SUFFIXES = {
+    "aggregaty": "aggregaty",
+    "avmex": "avmex",
+    "orange": "nm_orange",
+    "blue": "nm_blue",
+    "tir": "tir",
+}
+
+
+def _parse_direct_command(command):
+    """
+    Команды только в прямом формате:
+    /status_avmex
+    /balance_avmex
+    /ads_avmex
+    и *_all для всех аккаунтов.
+    """
+    if command == "/status_all":
+        return "full", None
+    if command == "/balance_all":
+        return "finance", None
+    if command == "/ads_all":
+        return "ads", None
+
+    for suffix, seller_key in ACCOUNT_COMMAND_SUFFIXES.items():
+        if command == f"/status_{suffix}":
+            return "full", seller_key
+        if command == f"/balance_{suffix}":
+            return "finance", seller_key
+        if command == f"/ads_{suffix}":
+            return "ads", seller_key
+
+    return None, None
+
+
+def _commands_help():
+    return (
+        "АВИТО · КОМАНДЫ\n\n"
+        "/status_all — всё по всем аккаунтам\n"
+        "/balance_all — баланс по всем аккаунтам\n"
+        "/ads_all — объявления по всем аккаунтам\n\n"
+        "Для конкретного аккаунта, например Авмекс:\n"
+        "/status_avmex\n"
+        "/balance_avmex\n"
+        "/ads_avmex\n\n"
+        "Суффиксы аккаунтов: aggregaty, avmex, orange, blue, tir\n\n"
+        "Автоматически по будням:\n"
+        "08:00 — status_all\n"
+        "08:40 — balance_all\n"
+        "10:00–16:00 каждый час — balance_all\n\n"
+        "/delete_after — время показа обычных сообщений\n"
+        "/commands — показать это меню"
+    )
+
+
+def _utf16_len(value):
+    return len(value.encode("utf-16-le")) // 2
+
+
+def _help_command_entities(text):
+    commands = [
+        "/status_all",
+        "/balance_all",
+        "/ads_all",
+        "/status_avmex",
+        "/balance_avmex",
+        "/ads_avmex",
+        "/delete_after",
+        "/commands",
+    ]
+
+    entities = []
+    search_from = 0
+    for command in commands:
+        pos = text.find(command, search_from)
+        if pos < 0:
+            pos = text.find(command)
+        if pos < 0:
+            continue
+
+        entities.append({
+            "type": "bot_command",
+            "offset": _utf16_len(text[:pos]),
+            "length": _utf16_len(command),
+        })
+        search_from = pos + len(command)
+
+    return entities
+
+
+def _help_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "📋 Вся информация", "callback_data": "help:status"},
+                {"text": "💰 Баланс", "callback_data": "help:balance"},
+            ],
+            [
+                {"text": "📣 Объявления", "callback_data": "help:ads"},
+            ],
+            [
+                {"text": "⏱ Время показа", "callback_data": "help:delete"},
+            ],
+        ]
+    }
+
+
+def _send_help(chat_id):
+    text = _commands_help()
+    message = telegram_api(
+        "sendMessage",
+        {
+            "chat_id": chat_id,
+            "text": text,
+            "entities": json.dumps(_help_command_entities(text), ensure_ascii=False),
+            "reply_markup": json.dumps(_help_keyboard(), ensure_ascii=False),
+        },
+    )
+    delete_message_later(chat_id, message["message_id"])
+    return message
+
+
+def _handle_help_callback(callback):
+    data = callback.get("data") or ""
+    message = callback.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    if chat_id is None:
+        return
+
+    try:
+        telegram_api(
+            "answerCallbackQuery",
+            {"callback_query_id": callback["id"]},
+        )
+    except Exception:
+        pass
+
+    if data == "help:delete":
+        _send_delete_after_settings(chat_id)
+    elif data == "help:status":
+        send_query(chat_id, "full", None)
+    elif data == "help:balance":
+        send_query(chat_id, "finance", None)
+    elif data == "help:ads":
+        send_query(chat_id, "ads", None)
+
+
+def send_query(chat_id, mode="full", seller_key=None):
+    # v36: никаких "получаю данные". Финальный ответ появится только после сбора.
+    start_background_query(chat_id, mode, seller_key)
+
+
+
+
+def _collector_from_user_word(value):
+    value = (value or "").strip().casefold()
+    aliases = {
+        "status": "full",
+        "full": "full",
+        "all": "full",
+        "статус": "full",
+        "всё": "full",
+        "все": "full",
+        "balance": "finance",
+        "finance": "finance",
+        "баланс": "finance",
+        "ads": "ads",
+        "объявления": "ads",
+        "объявление": "ads",
+    }
+    return aliases.get(value)
+
+
+def handle_update(update):
+    message = update.get("message")
+    if not message:
+        return
+
+    text = (message.get("text") or "").strip()
+    chat_id = message["chat"]["id"]
+
