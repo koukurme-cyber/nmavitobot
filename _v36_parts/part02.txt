@@ -1,14 +1,3 @@
-
-        print("PAYMENT STATE WRITE ERROR:", exc, flush=True)
-
-
-def _bootstrap_payment_state_from_status_cache(state):
-    # При первом запуске v33 пытаемся забрать даты из старого status_cache.json.
-    cached = load_cached_status()
-    if not cached:
-        return state
-
-    changed = False
     for seller in (cached.get("data") or {}).get("sellers") or []:
         if not isinstance(seller, dict):
             continue
@@ -207,4 +196,11 @@ def _seller_full_block(seller):
             lines.append(
                 f"Остаток размещений: {plain_number(seller.get('placements_remaining'))}"
             )
-    elif seller.get("advance") 
+    elif seller.get("advance") is not None:
+        lines.append(f"Аванс: {money(seller.get('advance'))}")
+
+    lines.extend([
+        f"Опубликовано: {plain_number(stats.get('published'))}",
+        f"Отклонено: {plain_number(stats.get('rejected'))}",
+        f"Заблокировано: {plain_number(stats.get('blocked'))}",
+        f"Снято: {plain_number(stats.get('removed'))}",
