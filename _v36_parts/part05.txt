@@ -1,0 +1,194 @@
+ов времени.")
+
+    return sorted(result)
+
+
+def _notify_keyboard(settings):
+    selected_days = set(settings.get("days") or [])
+    row1 = []
+    for i, label in enumerate(DAY_LABELS):
+        row1.append({
+            "text": ("✅ " if i in selected_days else "") + label,
+            "callback_data": f"notify:day:{i}",
+        })
+
+    enabled = bool(settings.get("enabled"))
+    state_button = {
+        "text": "🔔 Включено" if enabled else "🔕 Выключено",
+        "callback_data": "notify:toggle",
+    }
+
+    return {
+        "inline_keyboard": [
+            row1[:4],
+            row1[4:],
+            [
+                {"text": "Будни", "callback_data": "notify:weekdays"},
+                {"text": "Все дни", "callback_data": "notify:all_days"},
+                {"text": "Без дней", "callback_data": "notify:no_days"},
+            ],
+            [state_button],
+        ]
+    }
+
+
+def _notify_settings_text(settings):
+    days = sorted(set(settings.get("days") or []))
+    times = settings.get("times") or []
+    enabled = bool(settings.get("enabled"))
+
+    if days:
+        day_text = ", ".join(DAY_LABELS[i] for i in days if 0 <= i <= 6)
+    else:
+        day_text = "не выбраны"
+
+    time_text = ", ".join(times) if times else "не выбрано"
+
+    return (
+        "<b>АВИТО · УВЕДОМЛЕНИЯ</b>\n\n"
+        f"Статус: {'включены' if enabled else 'выключены'}\n"
+        f"Дни: {day_text}\n"
+        f"Время: {time_text}\n"
+        f"Часовой пояс: {html.escape(CONFIG.get('timezone', 'Europe/Moscow'))}\n\n"
+        "Дни выбираются кнопками ниже.\n"
+        "Время задаётся командой, например:\n"
+        "<code>/notify_times 09:00 13:30 18:00</code>\n\n"
+        "Можно указать до 8 вариантов времени."
+    )
+
+
+def _send_notify_settings(chat_id):
+    all_settings, settings = _get_chat_notify_settings(chat_id)
+    message = telegram_api(
+        "sendMessage",
+        {
+            "chat_id": chat_id,
+            "text": _notify_settings_text(settings),
+            "parse_mode": "HTML",
+            "reply_markup": json.dumps(_notify_keyboard(settings), ensure_ascii=False),
+        },
+    )
+    delete_message_later(
+        chat_id,
+        message["message_id"],
+        delay=None,
+    )
+    return message
+
+
+def _edit_notify_settings(chat_id, message_id, settings):
+    try:
+        telegram_api(
+            "editMessageText",
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": _notify_settings_text(settings),
+                "parse_mode": "HTML",
+                "reply_markup": json.dumps(_notify_keyboard(settings), ensure_ascii=False),
+            },
+        )
+    except Exception as exc:
+        if "message is not modified" not in str(exc).lower():
+            print("NOTIFY SETTINGS EDIT ERROR:", exc, flush=True)
+
+
+def _scheduled_status_text(data, fetched_at):
+    blocks = ["<b>АВИТО · УВЕДОМЛЕНИЕ</b>"]
+    blocks.extend(_seller_full_block(seller) for seller in data["sellers"])
+    blocks.append(_updated_line(fetched_at))
+    return "\n\n".join(blocks)
+
+
+def _send_scheduled_status(chat_id, scheduled_time):
+    # В отличие от ручной команды, никакого промежуточного "получаю данные":
+    # уведомление появляется только после полного сбора.
+    with _refresh_lock:
+        try:
+            tz_name = CONFIG.get("timezone", "Europe/Moscow")
+            data = get_status(CONFIG)
+            data = _apply_payment_dates(data)
+            fetched_at = datetime.now(ZoneInfo(tz_name)).strftime("%d.%m.%Y %H:%M")
+            save_cached_status(data, fetched_at)
+
+            message = telegram_api(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": _scheduled_status_text(data, fetched_at),
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": "true",
+                },
+            )
+            delete_message_later(
+                chat_id,
+                message["message_id"],
+                delay=None,
+            )
+            print(
+                f"Scheduled notification sent: chat={chat_id}, time={scheduled_time}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"SCHEDULED NOTIFICATION ERROR chat={chat_id}, time={scheduled_time}: {exc}",
+                flush=True,
+            )
+
+
+def _notification_scheduler_loop():
+    """
+    Проверяет расписание каждые 15 секунд.
+    После рестарта допускается опоздание до 3 минут, чтобы короткий redeploy
+    не съедал уведомление. Более старые пропущенные слоты не догоняются.
+    """
+    while True:
+        try:
+            tz_name = CONFIG.get("timezone", "Europe/Moscow")
+            now = datetime.now(ZoneInfo(tz_name))
+            all_settings = _load_notify_settings()
+            changed = False
+
+            for chat_key, settings in list(all_settings.items()):
+                if not isinstance(settings, dict) or not settings.get("enabled"):
+                    continue
+
+                days = set(settings.get("days") or [])
+                times = settings.get("times") or []
+                if now.weekday() not in days or not times:
+                    continue
+
+                last_sent = settings.setdefault("last_sent", {})
+                today_str = now.date().isoformat()
+
+                for time_str in times:
+                    try:
+                        hh, mm = [int(x) for x in time_str.split(":", 1)]
+                        scheduled_dt = now.replace(
+                            hour=hh,
+                            minute=mm,
+                            second=0,
+                            microsecond=0,
+                        )
+                    except Exception:
+                        continue
+
+                    seconds_late = (now - scheduled_dt).total_seconds()
+                    if not (0 <= seconds_late < 180):
+                        continue
+
+                    if last_sent.get(time_str) == today_str:
+                        continue
+
+                    # Отмечаем до отправки, чтобы параллельный цикл не дал дубль.
+                    last_sent[time_str] = today_str
+                    changed = True
+                    try:
+                        chat_id = int(chat_key)
+                    except ValueError:
+                        chat_id = chat_key
+
+                    threading.Thread(
+                        target=_send_scheduled_status,
+                        args=(chat_id, time_str),
+                       
