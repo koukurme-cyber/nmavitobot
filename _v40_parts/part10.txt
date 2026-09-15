@@ -1,0 +1,208 @@
+    chat_id = (message.get("chat") or {}).get("id")
+    if chat_id is None:
+        return
+
+    try:
+        telegram_api(
+            "answerCallbackQuery",
+            {"callback_query_id": callback["id"]},
+        )
+    except Exception:
+        pass
+
+    if data == "help:notify":
+        _send_notify_settings(chat_id)
+    elif data == "help:delete":
+        _send_delete_after_settings(chat_id)
+    elif data == "help:status":
+        send_query(chat_id, "full", None)
+    elif data == "help:balance":
+        send_query(chat_id, "finance", None)
+    elif data == "help:ads":
+        send_query(chat_id, "ads", None)
+
+
+def send_query(chat_id, mode="full", seller_key=None):
+    # v36: никаких "получаю данные". Финальный ответ появится только после сбора.
+    start_background_query(chat_id, mode, seller_key)
+
+
+
+
+def _collector_from_user_word(value):
+    value = (value or "").strip().casefold()
+    aliases = {
+        "status": "full",
+        "full": "full",
+        "all": "full",
+        "статус": "full",
+        "всё": "full",
+        "все": "full",
+        "balance": "finance",
+        "finance": "finance",
+        "баланс": "finance",
+        "ads": "ads",
+        "объявления": "ads",
+        "объявление": "ads",
+    }
+    return aliases.get(value)
+
+
+def handle_update(update):
+    message = update.get("message")
+    if not message:
+        return
+
+    text = (message.get("text") or "").strip()
+    chat_id = message["chat"]["id"]
+
+    # Если пользователь сейчас вводит время уведомления, обычный текст
+    # рассматривается как значение ЧЧ:ММ, а не игнорируется.
+    if _handle_pending_time_input(message):
+        return
+
+    if not text.startswith("/"):
+        return
+
+    command = text.split(maxsplit=1)[0].split("@", 1)[0].casefold()
+
+    # Команда пользователя исчезает по той же настройке, что и ответы бота.
+    delete_message_later(chat_id, message["message_id"])
+
+    if command == "/notify":
+        _send_notify_settings(chat_id)
+        return
+
+    if command == "/notify_times":
+        parts = text.split()
+
+        if len(parts) < 3:
+            reply = telegram_api(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": (
+                        "<b>АВИТО · НЕСТАНДАРТНОЕ ВРЕМЯ</b>\n\n"
+                        "Основной способ настройки — кнопки в /notify.\n\n"
+                        "Если нужно нестандартное время, укажите тип сборщика:\n"
+                        "/notify_times status 09:15 13:40\n"
+                        "/notify_times balance 10:05 17:35\n"
+                        "/notify_times ads 08:50 20:10"
+                    ),
+                    "parse_mode": "HTML",
+                },
+            )
+            delete_message_later(chat_id, reply["message_id"])
+            return
+
+        collector = _collector_from_user_word(parts[1])
+        if not collector:
+            reply = telegram_api(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": "Тип сборщика: status, balance или ads.",
+                },
+            )
+            delete_message_later(chat_id, reply["message_id"])
+            return
+
+        try:
+            times = _normalize_times(parts[2:])
+        except ValueError as exc:
+            reply = telegram_api(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": html.escape(str(exc)),
+                    "parse_mode": "HTML",
+                },
+            )
+            delete_message_later(chat_id, reply["message_id"])
+            return
+
+        all_settings, settings = _get_chat_notify_settings(chat_id)
+        _collector_cfg(settings, collector)["times"] = times
+        all_settings[str(chat_id)] = settings
+        _save_notify_settings(all_settings)
+
+        _send_notify_settings(chat_id)
+        return
+
+
+    if command == "/delete_after":
+        parts = text.split(maxsplit=1)
+
+        if len(parts) == 1:
+            _send_delete_after_settings(chat_id)
+            return
+
+        raw = parts[1].strip()
+        try:
+            minutes = int(raw)
+        except ValueError:
+            reply = telegram_api(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": "Укажите число минут, например <code>/delete_after 45</code>.",
+                    "parse_mode": "HTML",
+                },
+            )
+            delete_message_later(chat_id, reply["message_id"])
+            return
+
+        if minutes < 0 or minutes > 10080:
+            reply = telegram_api(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": "Допустимо от 0 до 10080 минут.",
+                    "parse_mode": "HTML",
+                },
+            )
+            delete_message_later(chat_id, reply["message_id"])
+            return
+
+        all_settings, settings = _get_chat_notify_settings(chat_id)
+        settings["delete_after_minutes"] = minutes
+        all_settings[str(chat_id)] = settings
+        _save_notify_settings(all_settings)
+        _send_delete_after_settings(chat_id)
+        return
+
+    if command == "/start":
+        _send_help(chat_id)
+        return
+
+    mode, seller_key = _parse_direct_command(command)
+    if mode:
+        send_query(chat_id, mode, seller_key)
+        return
+
+    if command in {"/help", "/commands"}:
+        _send_help(chat_id)
+
+
+def main():
+    print(f"Bot started {APP_VERSION}", flush=True)
+
+    try:
+        telegram_api("deleteWebhook", {"drop_pending_updates": "false"})
+    except Exception as exc:
+        print("Webhook cleanup warning:", exc, flush=True)
+
+    try:
+        telegram_api(
+            "setMyCommands",
+            {
+                "commands": json.dumps(
+                    [
+                        {"command": "status_all", "description": "Вся информация по всем аккаунтам"},
+                        {"command": "balance_all", "description": "Баланс по всем аккаунтам"},
+                        {"command": "ads_all", "description": "Статусы объявлений по всем аккаунтам"},
+
+                        {"command": "status_aggregaty", "description": "Всё: Агрегаты"},
+                        {"command": "balance_aggregaty", "description": "Баланс: Агрегаты"},
+                        {"command": "ads_aggregaty", "description": "Объявления: Агрегаты"},
+
