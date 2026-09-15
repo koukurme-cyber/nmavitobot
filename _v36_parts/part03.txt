@@ -1,11 +1,3 @@
-is not None:
-        lines.append(f"Аванс: {money(seller.get('advance'))}")
-
-    lines.extend([
-        f"Опубликовано: {plain_number(stats.get('published'))}",
-        f"Отклонено: {plain_number(stats.get('rejected'))}",
-        f"Заблокировано: {plain_number(stats.get('blocked'))}",
-        f"Снято: {plain_number(stats.get('removed'))}",
         f"Завершено: {plain_number(stats.get('old'))}",
     ])
 
@@ -181,6 +173,20 @@ def _chat_delete_after_minutes(chat_id):
         return DEFAULT_DELETE_AFTER_MINUTES
 
 
+def _remove_scheduled_delete(chat_id, message_id):
+    with _delete_queue_lock:
+        queue = _load_delete_queue()
+        filtered = [
+            x for x in queue
+            if not (
+                str(x.get("chat_id")) == str(chat_id)
+                and x.get("message_id") == message_id
+            )
+        ]
+        if len(filtered) != len(queue):
+            _save_delete_queue(filtered)
+
+
 def delete_message_later(chat_id, message_id, delay=None):
     """
     Ставит удаление в постоянную очередь.
@@ -196,6 +202,7 @@ def delete_message_later(chat_id, message_id, delay=None):
         delay = DEFAULT_DELETE_AFTER_MINUTES * 60
 
     if delay <= 0:
+        _remove_scheduled_delete(chat_id, message_id)
         return
 
     item = {
@@ -216,4 +223,8 @@ def delete_message_later(chat_id, message_id, delay=None):
                 and x.get("message_id") == message_id
             )
         ]
-    
+        queue.append(item)
+        _save_delete_queue(queue)
+
+
+def _delete_queue_loop():
