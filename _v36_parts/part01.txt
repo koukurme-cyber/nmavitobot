@@ -31,7 +31,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 _refresh_lock = threading.Lock()
 _keyboard_cleared_chats = set()
 DEFAULT_DELETE_AFTER_MINUTES = 20
-APP_VERSION = "v36"
+APP_VERSION = "v37"
 
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -211,3 +211,13 @@ def _save_payment_state(state):
             json.dump(state, f, ensure_ascii=False, indent=2)
         tmp_path.replace(PAYMENT_STATE_PATH)
     except Exception as exc:
+        print("PAYMENT STATE WRITE ERROR:", exc, flush=True)
+
+
+def _bootstrap_payment_state_from_status_cache(state):
+    # При первом запуске v33 пытаемся забрать даты из старого status_cache.json.
+    cached = load_cached_status()
+    if not cached:
+        return state
+
+    changed = False
