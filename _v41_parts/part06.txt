@@ -1,0 +1,202 @@
+        lines.append(f"Дни: {_days_text(cfg.get('days'))}")
+        lines.append(f"Время: {_times_text(cfg.get('times'))}")
+        lines.append("")
+
+    lines.append(
+        f"Часовой пояс: {html.escape(CONFIG.get('timezone', 'Europe/Moscow'))}"
+    )
+    lines.append("")
+    lines.append("Выберите тип сборщика кнопкой ниже.")
+
+    return "\n".join(lines)
+
+
+def _notify_overview_keyboard(settings):
+    rows = []
+    for collector, meta in NOTIFY_COLLECTORS.items():
+        cfg = _collector_cfg(settings, collector)
+        marker = "🔔" if cfg.get("enabled") else "🔕"
+        rows.append([{
+            "text": f"{marker} {meta['title']}",
+            "callback_data": f"notify:collector:{collector}",
+        }])
+
+    return {
+        "inline_keyboard": rows + [[
+            {"text": "Закрыть", "callback_data": "notify:close"}
+        ]]
+    }
+
+
+def _collector_text(settings, collector):
+    meta = NOTIFY_COLLECTORS[collector]
+    cfg = _collector_cfg(settings, collector)
+    enabled = bool(cfg.get("enabled"))
+
+    return (
+        f"<b>АВИТО · {html.escape(meta['title'].upper())}</b>\n\n"
+        f"Статус: {'включены' if enabled else 'выключены'}\n"
+        f"Дни: {_days_text(cfg.get('days'))}\n"
+        f"Время: {_times_text(cfg.get('times'))}\n\n"
+        "Чтобы добавить время, нажмите «➕ Добавить время» и просто введите его "
+        "в формате ЧЧ:ММ, например 09:15.\n"
+        "Для этого типа сборщика можно сохранить до 8 времён."
+    )
+
+
+def _collector_keyboard(settings, collector):
+    cfg = _collector_cfg(settings, collector)
+    selected_days = set(cfg.get("days") or [])
+    times = cfg.get("times") or []
+
+    day_buttons = []
+    for i, label in enumerate(DAY_LABELS):
+        day_buttons.append({
+            "text": ("✅ " if i in selected_days else "") + label,
+            "callback_data": f"notify:day:{collector}:{i}",
+        })
+
+    time_rows = []
+    for index, value in enumerate(times):
+        time_rows.append([
+            {
+                "text": f"⏰ {value}",
+                "callback_data": f"notify:edit:{collector}:{index}",
+            },
+            {
+                "text": "✕",
+                "callback_data": f"notify:del:{collector}:{index}",
+            },
+        ])
+
+    enabled = bool(cfg.get("enabled"))
+    rows = [
+        day_buttons[:4],
+        day_buttons[4:],
+        [
+            {"text": "Будни", "callback_data": f"notify:weekdays:{collector}"},
+            {"text": "Все дни", "callback_data": f"notify:all_days:{collector}"},
+            {"text": "Без дней", "callback_data": f"notify:no_days:{collector}"},
+        ],
+    ]
+
+    rows.extend(time_rows)
+
+    if len(times) < 8:
+        rows.append([{
+            "text": "➕ Добавить время",
+            "callback_data": f"notify:add:{collector}",
+        }])
+
+    rows.extend([
+        [{
+            "text": "🔔 Включено" if enabled else "🔕 Выключено",
+            "callback_data": f"notify:toggle:{collector}",
+        }],
+        [{
+            "text": "← К типам сборщиков",
+            "callback_data": "notify:home",
+        }],
+    ])
+
+    return {"inline_keyboard": rows}
+
+
+def _get_pending_time_input(settings):
+    pending = settings.get("pending_time_input")
+    return pending if isinstance(pending, dict) else None
+
+
+def _set_pending_time_input(
+    settings,
+    collector,
+    menu_message_id,
+    edit_index=None,
+    prompt_message_id=None,
+):
+    settings["pending_time_input"] = {
+        "collector": collector,
+        "menu_message_id": menu_message_id,
+        "edit_index": edit_index,
+        "prompt_message_id": prompt_message_id,
+        "created_at": int(time.time()),
+    }
+
+
+def _clear_pending_time_input(settings):
+    settings.pop("pending_time_input", None)
+
+
+def _time_input_prompt_text(collector, edit_index=None):
+    meta = NOTIFY_COLLECTORS[collector]
+    action = "Новое время" if edit_index is None else "Новое значение времени"
+
+    return (
+        f"<b>АВИТО · {html.escape(meta['title'].upper())}</b>\n\n"
+        f"{action}: введите время одним сообщением в формате <b>ЧЧ:ММ</b>.\n\n"
+        "Например: <code>09:15</code>\n"
+        "Для отмены отправьте <code>отмена</code>."
+    )
+
+
+def _send_time_input_prompt(chat_id, collector, menu_message_id, edit_index=None):
+    all_settings, settings = _get_chat_notify_settings(chat_id)
+
+    prompt = telegram_api(
+        "sendMessage",
+        {
+            "chat_id": chat_id,
+            "text": _time_input_prompt_text(collector, edit_index),
+            "parse_mode": "HTML",
+            "reply_markup": json.dumps(
+                {
+                    "force_reply": True,
+                    "selective": True,
+                    "input_field_placeholder": "Например 09:15",
+                },
+                ensure_ascii=False,
+            ),
+        },
+    )
+
+    _set_pending_time_input(
+        settings,
+        collector=collector,
+        menu_message_id=menu_message_id,
+        edit_index=edit_index,
+        prompt_message_id=prompt["message_id"],
+    )
+    all_settings[str(chat_id)] = settings
+    _save_notify_settings(all_settings)
+
+    delete_message_later(chat_id, prompt["message_id"])
+    return prompt
+
+
+def _parse_direct_time(value):
+    value = (value or "").strip()
+    try:
+        parsed = datetime.strptime(value, "%H:%M")
+    except ValueError:
+        return None
+    return parsed.strftime("%H:%M")
+
+
+def _handle_pending_time_input(message):
+    chat_id = (message.get("chat") or {}).get("id")
+    if chat_id is None:
+        return False
+
+    all_settings, settings = _get_chat_notify_settings(chat_id)
+    pending = _get_pending_time_input(settings)
+    if not pending:
+        return False
+
+    text = (message.get("text") or "").strip()
+    collector = pending.get("collector")
+    menu_message_id = pending.get("menu_message_id")
+    edit_index = pending.get("edit_index")
+    prompt_message_id = pending.get("prompt_message_id")
+
+    if collector not in NOTIFY_COLLECTORS:
+        _clear_pending_time_input(settings)
