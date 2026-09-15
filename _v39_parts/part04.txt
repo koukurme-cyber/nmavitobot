@@ -1,0 +1,216 @@
+        _remove_scheduled_delete(chat_id, message_id)
+        return
+
+    item = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "delete_at": int(time.time()) + delay,
+        "retries": 0,
+    }
+
+    with _delete_queue_lock:
+        queue = _load_delete_queue()
+
+        # Не плодим дубль для одного сообщения.
+        queue = [
+            x for x in queue
+            if not (
+                str(x.get("chat_id")) == str(chat_id)
+                and x.get("message_id") == message_id
+            )
+        ]
+        queue.append(item)
+        _save_delete_queue(queue)
+
+
+def _delete_queue_loop():
+    while True:
+        try:
+            now = int(time.time())
+            with _delete_queue_lock:
+                queue = _load_delete_queue()
+                remaining = []
+
+                for item in queue:
+                    if int(item.get("delete_at", 0)) > now:
+                        remaining.append(item)
+                        continue
+
+                    try:
+                        telegram_api(
+                            "deleteMessage",
+                            {
+                                "chat_id": item.get("chat_id"),
+                                "message_id": item.get("message_id"),
+                            },
+                        )
+                    except Exception as exc:
+                        text = str(exc).lower()
+
+                        # Сообщения уже нет — задача фактически выполнена.
+                        if "message to delete not found" in text:
+                            continue
+
+                        retries = int(item.get("retries", 0)) + 1
+                        if retries <= 5:
+                            item["retries"] = retries
+                            item["delete_at"] = now + 60
+                            remaining.append(item)
+                        else:
+                            print("DELETE GIVE UP:", exc, flush=True)
+
+                _save_delete_queue(remaining)
+
+        except Exception as exc:
+            print("DELETE QUEUE LOOP ERROR:", exc, flush=True)
+
+        time.sleep(15)
+
+
+def _start_delete_queue_worker():
+    thread = threading.Thread(
+        target=_delete_queue_loop,
+        daemon=True,
+    )
+    thread.start()
+
+
+def _send_final_query_result(chat_id, mode="full", seller_key=None):
+    # Пользователь ничего не видит, пока все данные не собраны.
+    with _refresh_lock:
+        try:
+            tz_name = CONFIG.get("timezone", "Europe/Moscow")
+            query_config = _config_for_seller(seller_key)
+
+            if mode == "finance":
+                data = get_financial_status(query_config)
+                renderer = render_account_balance if seller_key else render_balances
+            elif mode == "ads":
+                data = get_items_status(query_config)
+                renderer = render_account_ads if seller_key else render_ads
+            else:
+                data = get_status(query_config)
+                renderer = render_account if seller_key else render_status
+
+            if mode != "ads":
+                data = _apply_payment_dates(data)
+
+            fetched_at = datetime.now(ZoneInfo(tz_name)).strftime("%d.%m.%Y %H:%M")
+
+            if mode == "full" and not seller_key:
+                save_cached_status(data, fetched_at)
+
+            message = telegram_api(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": renderer(data, fetched_at),
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": "true",
+                },
+            )
+            delete_message_later(chat_id, message["message_id"])
+
+            print(
+                f"Telegram sent final: mode={mode}, seller={seller_key or 'all'}",
+                flush=True,
+            )
+
+        except Exception as exc:
+            print("BACKGROUND REFRESH ERROR:", exc, flush=True)
+            try:
+                message = telegram_api(
+                    "sendMessage",
+                    {
+                        "chat_id": chat_id,
+                        "text": "<b>АВИТО</b>\n\nНе удалось получить актуальные данные.",
+                        "parse_mode": "HTML",
+                    },
+                )
+                delete_message_later(chat_id, message["message_id"])
+            except Exception as send_exc:
+                print("ERROR SEND ERROR:", send_exc, flush=True)
+
+
+def start_background_query(chat_id, mode="full", seller_key=None):
+    thread = threading.Thread(
+        target=_send_final_query_result,
+        args=(chat_id, mode, seller_key),
+        daemon=True,
+    )
+    thread.start()
+
+
+def remove_legacy_keyboard(chat_id):
+    # v36: никаких промежуточных сообщений.
+    # Старую reply-клавиатуру больше не трогаем отдельным сообщением.
+    return
+
+
+
+DAY_LABELS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+NOTIFY_COLLECTORS = {
+    "full": {
+        "title": "Вся информация",
+        "short": "Статус",
+        "emoji": "📋",
+    },
+    "finance": {
+        "title": "Баланс",
+        "short": "Баланс",
+        "emoji": "💰",
+    },
+    "ads": {
+        "title": "Объявления",
+        "short": "Объявления",
+        "emoji": "📣",
+    },
+}
+
+
+def _default_collector_settings():
+    return {
+        "enabled": False,
+        "days": [0, 1, 2, 3, 4, 5, 6],
+        "times": [],
+        "last_sent": {},
+    }
+
+
+def _default_notify_settings():
+    return {
+        "collectors": {
+            key: _default_collector_settings()
+            for key in NOTIFY_COLLECTORS
+        },
+        "delete_after_minutes": DEFAULT_DELETE_AFTER_MINUTES,
+        "alarm_editor": {},
+    }
+
+
+def _load_notify_settings():
+    try:
+        if not NOTIFY_SETTINGS_PATH.exists():
+            return {}
+        with NOTIFY_SETTINGS_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        print("NOTIFY SETTINGS READ ERROR:", exc, flush=True)
+        return {}
+
+
+def _save_notify_settings(settings):
+    tmp = NOTIFY_SETTINGS_PATH.with_suffix(".tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+        tmp.replace(NOTIFY_SETTINGS_PATH)
+    except Exception as exc:
+        print("NOTIFY SETTINGS WRITE ERROR:", exc, flush=True)
+
+
+def _migrate_chat_notify_settings(current):
+    """
+    v35-v37 stored one global notification schedule per chat.
