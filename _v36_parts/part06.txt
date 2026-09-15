@@ -1,4 +1,8 @@
-  daemon=True,
+
+                    threading.Thread(
+                        target=_send_scheduled_status,
+                        args=(chat_id, time_str),
+                        daemon=True,
                     ).start()
 
             if changed:
