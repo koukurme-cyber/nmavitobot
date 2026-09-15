@@ -1,31 +1,41 @@
-ов времени.")
+    selected_times = set(settings.get("times") or [])
 
-    return sorted(result)
-
-
-def _notify_keyboard(settings):
-    selected_days = set(settings.get("days") or [])
-    row1 = []
+    day_buttons = []
     for i, label in enumerate(DAY_LABELS):
-        row1.append({
+        day_buttons.append({
             "text": ("✅ " if i in selected_days else "") + label,
             "callback_data": f"notify:day:{i}",
         })
 
+    time_buttons = []
+    for value in NOTIFY_TIME_PRESETS:
+        compact = value.replace(":", "")
+        time_buttons.append({
+            "text": ("✅ " if value in selected_times else "") + value,
+            "callback_data": f"notify:time:{compact}",
+        })
+
     enabled = bool(settings.get("enabled"))
     state_button = {
-        "text": "🔔 Включено" if enabled else "🔕 Выключено",
+        "text": "🔔 Уведомления включены" if enabled else "🔕 Уведомления выключены",
         "callback_data": "notify:toggle",
     }
 
     return {
         "inline_keyboard": [
-            row1[:4],
-            row1[4:],
+            [{"text": "ДНИ НЕДЕЛИ", "callback_data": "notify:noop"}],
+            day_buttons[:4],
+            day_buttons[4:],
             [
                 {"text": "Будни", "callback_data": "notify:weekdays"},
                 {"text": "Все дни", "callback_data": "notify:all_days"},
                 {"text": "Без дней", "callback_data": "notify:no_days"},
+            ],
+            [{"text": "ВРЕМЯ", "callback_data": "notify:noop"}],
+            time_buttons[:4],
+            time_buttons[4:],
+            [
+                {"text": "Очистить время", "callback_data": "notify:clear_times"},
             ],
             [state_button],
         ]
@@ -45,15 +55,15 @@ def _notify_settings_text(settings):
     time_text = ", ".join(times) if times else "не выбрано"
 
     return (
-        "<b>АВИТО · УВЕДОМЛЕНИЯ</b>\n\n"
-        f"Статус: {'включены' if enabled else 'выключены'}\n"
-        f"Дни: {day_text}\n"
-        f"Время: {time_text}\n"
-        f"Часовой пояс: {html.escape(CONFIG.get('timezone', 'Europe/Moscow'))}\n\n"
-        "Дни выбираются кнопками ниже.\n"
-        "Время задаётся командой, например:\n"
-        "<code>/notify_times 09:00 13:30 18:00</code>\n\n"
-        "Можно указать до 8 вариантов времени."
+        "<b>АВИТО · УВЕДОМЛЕНИЯ</b>\\n\\n"
+        f"Статус: {'включены' if enabled else 'выключены'}\\n"
+        f"Дни: {day_text}\\n"
+        f"Время: {time_text}\\n"
+        f"Часовой пояс: {html.escape(CONFIG.get('timezone', 'Europe/Moscow'))}\\n\\n"
+        "Дни и стандартное время выбираются кнопками ниже.\\n"
+        "Можно выбрать до 8 вариантов времени.\\n\\n"
+        "Для нестандартного времени остаётся команда:\\n"
+        "/notify_times 09:15 13:40 18:25"
     )
 
 
@@ -174,16 +184,3 @@ def _notification_scheduler_loop():
                         continue
 
                     seconds_late = (now - scheduled_dt).total_seconds()
-                    if not (0 <= seconds_late < 180):
-                        continue
-
-                    if last_sent.get(time_str) == today_str:
-                        continue
-
-                    # Отмечаем до отправки, чтобы параллельный цикл не дал дубль.
-                    last_sent[time_str] = today_str
-                    changed = True
-                    try:
-                        chat_id = int(chat_key)
-                    except ValueError:
-                        chat_id = chat_key
