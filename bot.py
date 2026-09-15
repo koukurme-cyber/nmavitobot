@@ -7,7 +7,7 @@ _SOURCE = "".join(
 )
 
 exec(
-    compile(_SOURCE, str(Path(__file__).with_name("bot_v36.py")), "exec"),
+    compile(_SOURCE, str(Path(__file__).with_name("bot_v37.py")), "exec"),
     globals(),
     globals(),
 )
