@@ -1,0 +1,187 @@
+                save_cached_status(data, fetched_at)
+
+            message = telegram_api(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": _scheduled_status_text(data, fetched_at, collector),
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": "true",
+                },
+            )
+            delete_message_later(
+                chat_id,
+                message["message_id"],
+                delay=FIXED_NOTIFICATION_TTL_SECONDS,
+            )
+
+            print(
+                f"Scheduled notification sent: chat={chat_id}, "
+                f"collector={collector}, time={scheduled_time}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"SCHEDULED NOTIFICATION ERROR chat={chat_id}, "
+                f"collector={collector}, time={scheduled_time}: {exc}",
+                flush=True,
+            )
+
+
+def _notification_scheduler_loop():
+    """
+    Фиксированное расписание, только Пн–Пт:
+      08:00 -> status_all
+      08:40 -> balance_all
+      10:00..16:00 каждый час -> balance_all
+
+    Пользовательские настройки уведомлений отключены.
+    notification_settings.json используется как реестр чатов и для настроек удаления.
+    """
+    while True:
+        try:
+            tz_name = CONFIG.get("timezone", "Europe/Moscow")
+            now = datetime.now(ZoneInfo(tz_name))
+
+            if now.weekday() < 5:
+                all_settings = _load_notify_settings()
+                changed = False
+                today_str = now.date().isoformat()
+
+                for chat_key, raw_settings in list(all_settings.items()):
+                    settings, migrated = _migrate_chat_notify_settings(raw_settings)
+                    if migrated:
+                        all_settings[chat_key] = settings
+                        changed = True
+
+                    fixed_last_sent = settings.setdefault(
+                        "fixed_schedule_last_sent",
+                        {},
+                    )
+
+                    for time_str, collector in FIXED_WEEKDAY_SCHEDULE.items():
+                        hh, mm = [int(x) for x in time_str.split(":", 1)]
+                        scheduled_dt = now.replace(
+                            hour=hh,
+                            minute=mm,
+                            second=0,
+                            microsecond=0,
+                        )
+                        seconds_late = (now - scheduled_dt).total_seconds()
+
+                        # После короткого рестарта допускаем запоздание до 3 минут.
+                        if not (0 <= seconds_late < 180):
+                            continue
+
+                        if fixed_last_sent.get(time_str) == today_str:
+                            continue
+
+                        fixed_last_sent[time_str] = today_str
+                        changed = True
+
+                        try:
+                            chat_id = int(chat_key)
+                        except ValueError:
+                            chat_id = chat_key
+
+                        threading.Thread(
+                            target=_send_scheduled_status,
+                            args=(chat_id, collector, time_str),
+                            daemon=True,
+                        ).start()
+
+                if changed:
+                    _save_notify_settings(all_settings)
+
+        except Exception as exc:
+            print("FIXED NOTIFICATION SCHEDULER ERROR:", exc, flush=True)
+
+        time.sleep(15)
+
+
+def _start_notification_scheduler():
+    thread = threading.Thread(
+        target=_notification_scheduler_loop,
+        daemon=True,
+    )
+    thread.start()
+
+
+def _answer_callback(callback, text=None, alert=False):
+    payload = {"callback_query_id": callback["id"]}
+    if text:
+        payload["text"] = text
+        payload["show_alert"] = "true" if alert else "false"
+    try:
+        telegram_api("answerCallbackQuery", payload)
+    except Exception:
+        pass
+
+
+def _handle_notify_callback(callback):
+    data = callback.get("data") or ""
+    message = callback.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    if chat_id is None or message_id is None:
+        return
+
+    all_settings, settings = _get_chat_notify_settings(chat_id)
+
+    if data == "notify:close":
+        _answer_callback(callback)
+        try:
+            telegram_api(
+                "deleteMessage",
+                {"chat_id": chat_id, "message_id": message_id},
+            )
+        except Exception:
+            pass
+        return
+
+    if data == "notify:home":
+        _answer_callback(callback)
+        _edit_notify_message(
+            chat_id,
+            message_id,
+            _notify_overview_text(settings),
+            _notify_overview_keyboard(settings),
+        )
+        return
+
+    if data.startswith("notify:collector:"):
+        collector = data.rsplit(":", 1)[1]
+        if collector not in NOTIFY_COLLECTORS:
+            return
+        _answer_callback(callback)
+        _edit_notify_message(
+            chat_id,
+            message_id,
+            _collector_text(settings, collector),
+            _collector_keyboard(settings, collector),
+        )
+        return
+
+    if data.startswith("notify:day:"):
+        _, _, collector, day_raw = data.split(":", 3)
+        if collector not in NOTIFY_COLLECTORS:
+            return
+        try:
+            day = int(day_raw)
+        except ValueError:
+            return
+
+        cfg = _collector_cfg(settings, collector)
+        days = set(cfg.get("days") or [])
+        if day in days:
+            days.remove(day)
+        else:
+            days.add(day)
+        cfg["days"] = sorted(days)
+
+        all_settings[str(chat_id)] = settings
+        _save_notify_settings(all_settings)
+        _answer_callback(callback)
+        _edit_notify_message(
+            chat_id,
