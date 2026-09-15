@@ -1,0 +1,222 @@
+def _answer_callback(callback, text=None, alert=False):
+    payload = {"callback_query_id": callback["id"]}
+    if text:
+        payload["text"] = text
+        payload["show_alert"] = "true" if alert else "false"
+    try:
+        telegram_api("answerCallbackQuery", payload)
+    except Exception:
+        pass
+
+
+def _handle_notify_callback(callback):
+    data = callback.get("data") or ""
+    message = callback.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    if chat_id is None or message_id is None:
+        return
+
+    all_settings, settings = _get_chat_notify_settings(chat_id)
+
+    if data == "notify:close":
+        _answer_callback(callback)
+        try:
+            telegram_api(
+                "deleteMessage",
+                {"chat_id": chat_id, "message_id": message_id},
+            )
+        except Exception:
+            pass
+        return
+
+    if data == "notify:home":
+        _answer_callback(callback)
+        _edit_notify_message(
+            chat_id,
+            message_id,
+            _notify_overview_text(settings),
+            _notify_overview_keyboard(settings),
+        )
+        return
+
+    if data.startswith("notify:collector:"):
+        collector = data.rsplit(":", 1)[1]
+        if collector not in NOTIFY_COLLECTORS:
+            return
+        _answer_callback(callback)
+        _edit_notify_message(
+            chat_id,
+            message_id,
+            _collector_text(settings, collector),
+            _collector_keyboard(settings, collector),
+        )
+        return
+
+    if data.startswith("notify:day:"):
+        _, _, collector, day_raw = data.split(":", 3)
+        if collector not in NOTIFY_COLLECTORS:
+            return
+        try:
+            day = int(day_raw)
+        except ValueError:
+            return
+
+        cfg = _collector_cfg(settings, collector)
+        days = set(cfg.get("days") or [])
+        if day in days:
+            days.remove(day)
+        else:
+            days.add(day)
+        cfg["days"] = sorted(days)
+
+        all_settings[str(chat_id)] = settings
+        _save_notify_settings(all_settings)
+        _answer_callback(callback)
+        _edit_notify_message(
+            chat_id,
+            message_id,
+            _collector_text(settings, collector),
+            _collector_keyboard(settings, collector),
+        )
+        return
+
+    for prefix, days in (
+        ("notify:weekdays:", [0, 1, 2, 3, 4]),
+        ("notify:all_days:", [0, 1, 2, 3, 4, 5, 6]),
+        ("notify:no_days:", []),
+    ):
+        if data.startswith(prefix):
+            collector = data[len(prefix):]
+            if collector not in NOTIFY_COLLECTORS:
+                return
+            _collector_cfg(settings, collector)["days"] = days
+            all_settings[str(chat_id)] = settings
+            _save_notify_settings(all_settings)
+            _answer_callback(callback)
+            _edit_notify_message(
+                chat_id,
+                message_id,
+                _collector_text(settings, collector),
+                _collector_keyboard(settings, collector),
+            )
+            return
+
+    if data.startswith("notify:toggle:"):
+        collector = data.rsplit(":", 1)[1]
+        if collector not in NOTIFY_COLLECTORS:
+            return
+        cfg = _collector_cfg(settings, collector)
+
+        if not cfg.get("enabled"):
+            if not cfg.get("days"):
+                _answer_callback(
+                    callback,
+                    "Сначала выберите хотя бы один день.",
+                    alert=True,
+                )
+                return
+            if not cfg.get("times"):
+                _answer_callback(
+                    callback,
+                    "Сначала добавьте хотя бы одно время.",
+                    alert=True,
+                )
+                return
+
+        cfg["enabled"] = not bool(cfg.get("enabled"))
+        all_settings[str(chat_id)] = settings
+        _save_notify_settings(all_settings)
+        _answer_callback(callback)
+        _edit_notify_message(
+            chat_id,
+            message_id,
+            _collector_text(settings, collector),
+            _collector_keyboard(settings, collector),
+        )
+        return
+
+    if data.startswith("notify:add:"):
+        collector = data.rsplit(":", 1)[1]
+        if collector not in NOTIFY_COLLECTORS:
+            return
+
+        cfg = _collector_cfg(settings, collector)
+        if len(cfg.get("times") or []) >= 8:
+            _answer_callback(
+                callback,
+                "Для этого сборщика уже сохранено 8 времён.",
+                alert=True,
+            )
+            return
+
+        _answer_callback(callback)
+        _send_time_input_prompt(
+            chat_id,
+            collector,
+            menu_message_id=message_id,
+            edit_index=None,
+        )
+        return
+
+
+    if data.startswith("notify:edit:"):
+        _, _, collector, index_raw = data.split(":", 3)
+        if collector not in NOTIFY_COLLECTORS:
+            return
+
+        try:
+            index = int(index_raw)
+        except ValueError:
+            return
+
+        cfg = _collector_cfg(settings, collector)
+        times = cfg.get("times") or []
+        if not (0 <= index < len(times)):
+            return
+
+        _answer_callback(callback)
+        _send_time_input_prompt(
+            chat_id,
+            collector,
+            menu_message_id=message_id,
+            edit_index=index,
+        )
+        return
+
+
+    if data.startswith("notify:del:"):
+        _, _, collector, index_raw = data.split(":", 3)
+        if collector not in NOTIFY_COLLECTORS:
+            return
+        try:
+            index = int(index_raw)
+        except ValueError:
+            return
+
+        cfg = _collector_cfg(settings, collector)
+        times = list(cfg.get("times") or [])
+        if 0 <= index < len(times):
+            times.pop(index)
+            cfg["times"] = times
+
+        all_settings[str(chat_id)] = settings
+        _save_notify_settings(all_settings)
+        _answer_callback(callback)
+        _edit_notify_message(
+            chat_id,
+            message_id,
+            _collector_text(settings, collector),
+            _collector_keyboard(settings, collector),
+        )
+        return
+
+
+
+DELETE_PRESETS = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180]
+
+
+def _delete_after_text(settings):
+    minutes = int(settings.get("delete_after_minutes", DEFAULT_DELETE_AFTER_MINUTES))
+    if minutes <= 0:
