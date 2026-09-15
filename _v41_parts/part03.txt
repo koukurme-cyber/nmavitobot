@@ -1,0 +1,203 @@
+    return data
+
+
+def _regular_payment_line(payment):
+    if not isinstance(payment, dict) or not payment:
+        return None
+
+    date = payment.get("date")
+    amount = payment.get("amount")
+    status = payment.get("payment_status")
+
+    parts = []
+    if date:
+        parts.append(html.escape(str(date)))
+    if amount is not None:
+        if parts:
+            parts.append("—")
+        parts.append(money(amount))
+
+    if not parts:
+        return None
+
+    if status == "unconfirmed":
+        return f"🔴 <b>Платёж не подтверждён: {' '.join(parts)}</b>"
+
+    text = "Регулярный платёж: " + " ".join(parts)
+
+    if status == "soon":
+        return f"🔴 <b>{text}</b>"
+
+    return text
+
+
+def _seller_full_block(seller):
+    name = html.escape(seller.get("name") or _seller_short_name(seller))
+
+    if seller.get("error"):
+        return f"<b>{name}</b>\nОшибка: {html.escape(str(seller['error']))}"
+
+    stats = seller.get("ads") or {}
+    lines = [f"<b>{name}</b>"]
+
+    lines.append(f"Кошелёк: {money(seller.get('wallet'))}")
+
+    if seller.get("financial_mode") == "placements":
+        if seller.get("placements_remaining") is not None:
+            lines.append(
+                f"Остаток размещений: {plain_number(seller.get('placements_remaining'))}"
+            )
+    elif seller.get("advance") is not None:
+        lines.append(f"Аванс: {money(seller.get('advance'))}")
+
+    lines.extend([
+        f"Опубликовано: {plain_number(stats.get('published'))}",
+        f"Отклонено: {plain_number(stats.get('rejected'))}",
+        f"Заблокировано: {plain_number(stats.get('blocked'))}",
+        f"Снято: {plain_number(stats.get('removed'))}",
+        f"Завершено: {plain_number(stats.get('old'))}",
+    ])
+
+
+    payment = seller.get("subscription_next_payment") or seller.get("next_tariff")
+    payment_line = _regular_payment_line(payment)
+    if payment_line:
+        lines.append(payment_line)
+
+    return "\n".join(lines)
+
+
+def _seller_balance_block(seller):
+    name = html.escape(seller.get("name") or _seller_short_name(seller))
+
+    if seller.get("error"):
+        return f"<b>{name}</b>\nОшибка: {html.escape(str(seller['error']))}"
+
+    lines = [
+        f"<b>{name}</b>",
+        f"Кошелёк: {money(seller.get('wallet'))}",
+    ]
+
+    if seller.get("financial_mode") == "placements":
+        if seller.get("placements_remaining") is not None:
+            lines.append(
+                f"Остаток размещений: {plain_number(seller.get('placements_remaining'))}"
+            )
+    elif seller.get("advance") is not None:
+        lines.append(f"Аванс: {money(seller.get('advance'))}")
+
+
+    payment = seller.get("subscription_next_payment") or seller.get("next_tariff")
+    payment_line = _regular_payment_line(payment)
+    if payment_line:
+        lines.append(payment_line)
+
+    return "\n".join(lines)
+
+
+def _seller_ads_block(seller):
+    name = html.escape(seller.get("name") or _seller_short_name(seller))
+
+    if seller.get("error"):
+        return f"<b>{name}</b>\nОшибка: {html.escape(str(seller['error']))}"
+
+    stats = seller.get("ads") or {}
+    return "\n".join([
+        f"<b>{name}</b>",
+        f"Опубликовано: {plain_number(stats.get('published'))}",
+        f"Отклонено: {plain_number(stats.get('rejected'))}",
+        f"Заблокировано: {plain_number(stats.get('blocked'))}",
+        f"Снято: {plain_number(stats.get('removed'))}",
+        f"Завершено: {plain_number(stats.get('old'))}",
+    ])
+
+
+def render_status(data, fetched_at=None):
+    blocks = ["<b>АВИТО</b>"]
+    blocks.extend(_seller_full_block(seller) for seller in data["sellers"])
+    blocks.append(_updated_line(fetched_at))
+    return "\n\n".join(blocks)
+
+
+def render_balances(data, fetched_at=None):
+    blocks = ["<b>АВИТО · БАЛАНС</b>"]
+    blocks.extend(_seller_balance_block(seller) for seller in data["sellers"])
+    blocks.append(_updated_line(fetched_at))
+    return "\n\n".join(blocks)
+
+
+def render_ads(data, fetched_at=None):
+    blocks = ["<b>АВИТО · ОБЪЯВЛЕНИЯ</b>"]
+    blocks.extend(_seller_ads_block(seller) for seller in data["sellers"])
+    blocks.append(_updated_line(fetched_at))
+    return "\n\n".join(blocks)
+
+
+def render_account(data, fetched_at=None):
+    return "\n\n".join([
+        "<b>АВИТО</b>",
+        _seller_full_block(data["sellers"][0]),
+        _updated_line(fetched_at),
+    ])
+
+
+def render_account_balance(data, fetched_at=None):
+    return "\n\n".join([
+        "<b>АВИТО · БАЛАНС</b>",
+        _seller_balance_block(data["sellers"][0]),
+        _updated_line(fetched_at),
+    ])
+
+
+def render_account_ads(data, fetched_at=None):
+    return "\n\n".join([
+        "<b>АВИТО · ОБЪЯВЛЕНИЯ</b>",
+        _seller_ads_block(data["sellers"][0]),
+        _updated_line(fetched_at),
+    ])
+
+
+def load_cached_status():
+    try:
+        if not CACHE_PATH.exists():
+            return None
+        with CACHE_PATH.open("r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if not isinstance(cached, dict) or "data" not in cached:
+            return None
+        return cached
+    except Exception as exc:
+        print("CACHE READ ERROR:", exc, flush=True)
+        return None
+
+
+def save_cached_status(data, fetched_at):
+    tmp_path = CACHE_PATH.with_suffix(".tmp")
+    payload = {"data": data, "fetched_at": fetched_at}
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        tmp_path.replace(CACHE_PATH)
+    except Exception as exc:
+        print("CACHE WRITE ERROR:", exc, flush=True)
+
+
+
+def _config_for_seller(seller_key=None):
+    if not seller_key:
+        return CONFIG
+    sellers = [seller for seller in CONFIG["sellers"] if seller["key"] == seller_key]
+    if not sellers:
+        raise RuntimeError(f"Неизвестный аккаунт: {seller_key}")
+    return {
+        "timezone": CONFIG.get("timezone", "Europe/Moscow"),
+        "sellers": sellers,
+    }
+
+
+_delete_queue_lock = threading.Lock()
+
+
+def _load_delete_queue():
+    try:
+        if not DELETE_QUEUE_PATH.exists():
