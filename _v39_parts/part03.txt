@@ -1,0 +1,212 @@
+    elif seller.get("advance") is not None:
+        lines.append(f"Аванс: {money(seller.get('advance'))}")
+
+    lines.extend([
+        f"Опубликовано: {plain_number(stats.get('published'))}",
+        f"Отклонено: {plain_number(stats.get('rejected'))}",
+        f"Заблокировано: {plain_number(stats.get('blocked'))}",
+        f"Снято: {plain_number(stats.get('removed'))}",
+        f"Завершено: {plain_number(stats.get('old'))}",
+    ])
+
+
+    payment = seller.get("subscription_next_payment") or seller.get("next_tariff")
+    payment_line = _regular_payment_line(payment)
+    if payment_line:
+        lines.append(payment_line)
+
+    return "\n".join(lines)
+
+
+def _seller_balance_block(seller):
+    name = html.escape(seller.get("name") or _seller_short_name(seller))
+
+    if seller.get("error"):
+        return f"<b>{name}</b>\nОшибка: {html.escape(str(seller['error']))}"
+
+    lines = [
+        f"<b>{name}</b>",
+        f"Кошелёк: {money(seller.get('wallet'))}",
+    ]
+
+    if seller.get("financial_mode") == "placements":
+        if seller.get("placements_remaining") is not None:
+            lines.append(
+                f"Остаток размещений: {plain_number(seller.get('placements_remaining'))}"
+            )
+    elif seller.get("advance") is not None:
+        lines.append(f"Аванс: {money(seller.get('advance'))}")
+
+
+    payment = seller.get("subscription_next_payment") or seller.get("next_tariff")
+    payment_line = _regular_payment_line(payment)
+    if payment_line:
+        lines.append(payment_line)
+
+    return "\n".join(lines)
+
+
+def _seller_ads_block(seller):
+    name = html.escape(seller.get("name") or _seller_short_name(seller))
+
+    if seller.get("error"):
+        return f"<b>{name}</b>\nОшибка: {html.escape(str(seller['error']))}"
+
+    stats = seller.get("ads") or {}
+    return "\n".join([
+        f"<b>{name}</b>",
+        f"Опубликовано: {plain_number(stats.get('published'))}",
+        f"Отклонено: {plain_number(stats.get('rejected'))}",
+        f"Заблокировано: {plain_number(stats.get('blocked'))}",
+        f"Снято: {plain_number(stats.get('removed'))}",
+        f"Завершено: {plain_number(stats.get('old'))}",
+    ])
+
+
+def render_status(data, fetched_at=None):
+    blocks = ["<b>АВИТО</b>"]
+    blocks.extend(_seller_full_block(seller) for seller in data["sellers"])
+    blocks.append(_updated_line(fetched_at))
+    return "\n\n".join(blocks)
+
+
+def render_balances(data, fetched_at=None):
+    blocks = ["<b>АВИТО · БАЛАНС</b>"]
+    blocks.extend(_seller_balance_block(seller) for seller in data["sellers"])
+    blocks.append(_updated_line(fetched_at))
+    return "\n\n".join(blocks)
+
+
+def render_ads(data, fetched_at=None):
+    blocks = ["<b>АВИТО · ОБЪЯВЛЕНИЯ</b>"]
+    blocks.extend(_seller_ads_block(seller) for seller in data["sellers"])
+    blocks.append(_updated_line(fetched_at))
+    return "\n\n".join(blocks)
+
+
+def render_account(data, fetched_at=None):
+    return "\n\n".join([
+        "<b>АВИТО</b>",
+        _seller_full_block(data["sellers"][0]),
+        _updated_line(fetched_at),
+    ])
+
+
+def render_account_balance(data, fetched_at=None):
+    return "\n\n".join([
+        "<b>АВИТО · БАЛАНС</b>",
+        _seller_balance_block(data["sellers"][0]),
+        _updated_line(fetched_at),
+    ])
+
+
+def render_account_ads(data, fetched_at=None):
+    return "\n\n".join([
+        "<b>АВИТО · ОБЪЯВЛЕНИЯ</b>",
+        _seller_ads_block(data["sellers"][0]),
+        _updated_line(fetched_at),
+    ])
+
+
+def load_cached_status():
+    try:
+        if not CACHE_PATH.exists():
+            return None
+        with CACHE_PATH.open("r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if not isinstance(cached, dict) or "data" not in cached:
+            return None
+        return cached
+    except Exception as exc:
+        print("CACHE READ ERROR:", exc, flush=True)
+        return None
+
+
+def save_cached_status(data, fetched_at):
+    tmp_path = CACHE_PATH.with_suffix(".tmp")
+    payload = {"data": data, "fetched_at": fetched_at}
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        tmp_path.replace(CACHE_PATH)
+    except Exception as exc:
+        print("CACHE WRITE ERROR:", exc, flush=True)
+
+
+
+def _config_for_seller(seller_key=None):
+    if not seller_key:
+        return CONFIG
+    sellers = [seller for seller in CONFIG["sellers"] if seller["key"] == seller_key]
+    if not sellers:
+        raise RuntimeError(f"Неизвестный аккаунт: {seller_key}")
+    return {
+        "timezone": CONFIG.get("timezone", "Europe/Moscow"),
+        "sellers": sellers,
+    }
+
+
+_delete_queue_lock = threading.Lock()
+
+
+def _load_delete_queue():
+    try:
+        if not DELETE_QUEUE_PATH.exists():
+            return []
+        with DELETE_QUEUE_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        print("DELETE QUEUE READ ERROR:", exc, flush=True)
+        return []
+
+
+def _save_delete_queue(queue):
+    tmp = DELETE_QUEUE_PATH.with_suffix(".tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(queue, f, ensure_ascii=False, indent=2)
+        tmp.replace(DELETE_QUEUE_PATH)
+    except Exception as exc:
+        print("DELETE QUEUE WRITE ERROR:", exc, flush=True)
+
+
+def _chat_delete_after_minutes(chat_id):
+    try:
+        _, settings = _get_chat_notify_settings(chat_id)
+        value = settings.get("delete_after_minutes", DEFAULT_DELETE_AFTER_MINUTES)
+        value = int(value)
+        return max(0, value)
+    except Exception:
+        return DEFAULT_DELETE_AFTER_MINUTES
+
+
+def _remove_scheduled_delete(chat_id, message_id):
+    with _delete_queue_lock:
+        queue = _load_delete_queue()
+        filtered = [
+            x for x in queue
+            if not (
+                str(x.get("chat_id")) == str(chat_id)
+                and x.get("message_id") == message_id
+            )
+        ]
+        if len(filtered) != len(queue):
+            _save_delete_queue(filtered)
+
+
+def delete_message_later(chat_id, message_id, delay=None):
+    """
+    Ставит удаление в постоянную очередь.
+    delay=None -> использовать настройку конкретного чата.
+    delay=0 -> не удалять.
+    """
+    if delay is None:
+        delay = _chat_delete_after_minutes(chat_id) * 60
+
+    try:
+        delay = int(delay)
+    except Exception:
+        delay = DEFAULT_DELETE_AFTER_MINUTES * 60
+
+    if delay <= 0:
