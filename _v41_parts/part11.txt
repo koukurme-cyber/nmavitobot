@@ -1,0 +1,159 @@
+    if not text.startswith("/"):
+        return
+
+    command = text.split(maxsplit=1)[0].split("@", 1)[0].casefold()
+
+    # Команда пользователя исчезает по той же настройке, что и ответы бота.
+    delete_message_later(chat_id, message["message_id"])
+
+    if command == "/delete_after":
+        parts = text.split(maxsplit=1)
+
+        if len(parts) == 1:
+            _send_delete_after_settings(chat_id)
+            return
+
+        raw = parts[1].strip()
+        try:
+            minutes = int(raw)
+        except ValueError:
+            reply = telegram_api(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": "Укажите число минут, например <code>/delete_after 45</code>.",
+                    "parse_mode": "HTML",
+                },
+            )
+            delete_message_later(chat_id, reply["message_id"])
+            return
+
+        if minutes < 0 or minutes > 10080:
+            reply = telegram_api(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": "Допустимо от 0 до 10080 минут.",
+                    "parse_mode": "HTML",
+                },
+            )
+            delete_message_later(chat_id, reply["message_id"])
+            return
+
+        all_settings, settings = _get_chat_notify_settings(chat_id)
+        settings["delete_after_minutes"] = minutes
+        all_settings[str(chat_id)] = settings
+        _save_notify_settings(all_settings)
+        _send_delete_after_settings(chat_id)
+        return
+
+    if command == "/start":
+        _send_help(chat_id)
+        return
+
+    mode, seller_key = _parse_direct_command(command)
+    if mode:
+        send_query(chat_id, mode, seller_key)
+        return
+
+    if command in {"/help", "/commands"}:
+        _send_help(chat_id)
+
+
+def main():
+    print(f"Bot started {APP_VERSION}", flush=True)
+
+    try:
+        telegram_api("deleteWebhook", {"drop_pending_updates": "false"})
+    except Exception as exc:
+        print("Webhook cleanup warning:", exc, flush=True)
+
+    try:
+        telegram_api(
+            "setMyCommands",
+            {
+                "commands": json.dumps(
+                    [
+                        {"command": "status_all", "description": "Вся информация по всем аккаунтам"},
+                        {"command": "balance_all", "description": "Баланс по всем аккаунтам"},
+                        {"command": "ads_all", "description": "Статусы объявлений по всем аккаунтам"},
+
+                        {"command": "status_aggregaty", "description": "Всё: Агрегаты"},
+                        {"command": "balance_aggregaty", "description": "Баланс: Агрегаты"},
+                        {"command": "ads_aggregaty", "description": "Объявления: Агрегаты"},
+
+                        {"command": "status_avmex", "description": "Всё: Авмекс"},
+                        {"command": "balance_avmex", "description": "Баланс: Авмекс"},
+                        {"command": "ads_avmex", "description": "Объявления: Авмекс"},
+
+                        {"command": "status_orange", "description": "Всё: НМ оранжевые"},
+                        {"command": "balance_orange", "description": "Баланс: НМ оранжевые"},
+                        {"command": "ads_orange", "description": "Объявления: НМ оранжевые"},
+
+                        {"command": "status_blue", "description": "Всё: НМ синие"},
+                        {"command": "balance_blue", "description": "Баланс: НМ синие"},
+                        {"command": "ads_blue", "description": "Объявления: НМ синие"},
+
+                        {"command": "status_tir", "description": "Всё: ТИР"},
+                        {"command": "balance_tir", "description": "Баланс: ТИР"},
+                        {"command": "ads_tir", "description": "Объявления: ТИР"},
+
+                        {"command": "delete_after", "description": "Настроить автоудаление сообщений"},
+                        {"command": "commands", "description": "Показать список команд"},
+                    ],
+                    ensure_ascii=False,
+                )
+            },
+        )
+    except Exception as exc:
+        print("Command setup warning:", exc, flush=True)
+
+    _start_delete_queue_worker()
+    _start_notification_scheduler()
+
+    offset = None
+
+    while True:
+        try:
+            params = {
+                "timeout": 50,
+                "allowed_updates": json.dumps(["message", "callback_query"]),
+            }
+            if offset is not None:
+                params["offset"] = offset
+
+            updates = telegram_api("getUpdates", params)
+
+            for update in updates:
+                offset = update["update_id"] + 1
+                if update.get("callback_query"):
+                    callback = update["callback_query"]
+                    data = callback.get("data") or ""
+                    if data.startswith("help:"):
+                        _handle_help_callback(callback)
+                    elif data.startswith("delete:"):
+                        _handle_delete_callback(callback)
+                    else:
+                        try:
+                            telegram_api(
+                                "answerCallbackQuery",
+                                {
+                                    "callback_query_id": callback["id"],
+                                    "text": "Расписание уведомлений теперь фиксированное.",
+                                    "show_alert": "true",
+                                },
+                            )
+                        except Exception:
+                            pass
+                else:
+                    handle_update(update)
+
+        except KeyboardInterrupt:
+            break
+        except Exception as exc:
+            print("ERROR:", exc, flush=True)
+            time.sleep(3)
+
+
+if __name__ == "__main__":
+    main()
