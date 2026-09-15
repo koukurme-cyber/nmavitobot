@@ -1,0 +1,198 @@
+    delete_message_later(chat_id, message["message_id"], delay=1)
+
+    if menu_message_id:
+        _edit_notify_message(
+            chat_id,
+            menu_message_id,
+            _collector_text(settings, collector),
+            _collector_keyboard(settings, collector),
+        )
+
+    confirmation = telegram_api(
+        "sendMessage",
+        {
+            "chat_id": chat_id,
+            "text": f"Время сохранено: <b>{html.escape(value)}</b>",
+            "parse_mode": "HTML",
+        },
+    )
+    delete_message_later(chat_id, confirmation["message_id"], delay=5)
+    return True
+
+
+def _send_notify_settings(chat_id):
+    all_settings, settings = _get_chat_notify_settings(chat_id)
+    message = telegram_api(
+        "sendMessage",
+        {
+            "chat_id": chat_id,
+            "text": _notify_overview_text(settings),
+            "parse_mode": "HTML",
+            "reply_markup": json.dumps(
+                _notify_overview_keyboard(settings),
+                ensure_ascii=False,
+            ),
+        },
+    )
+    delete_message_later(chat_id, message["message_id"])
+    return message
+
+
+def _edit_notify_message(chat_id, message_id, text, keyboard):
+    try:
+        telegram_api(
+            "editMessageText",
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "reply_markup": json.dumps(keyboard, ensure_ascii=False),
+            },
+        )
+    except Exception as exc:
+        if "message is not modified" not in str(exc).lower():
+            print("NOTIFY EDIT ERROR:", exc, flush=True)
+
+
+def _scheduled_status_text(data, fetched_at, collector):
+    meta = NOTIFY_COLLECTORS[collector]
+
+    if collector == "finance":
+        return render_balances(data, fetched_at)
+    if collector == "ads":
+        return render_ads(data, fetched_at)
+
+    blocks = ["<b>АВИТО · УВЕДОМЛЕНИЕ</b>"]
+    blocks.extend(_seller_full_block(seller) for seller in data["sellers"])
+    blocks.append(_updated_line(fetched_at))
+    return "\n\n".join(blocks)
+
+
+def _send_scheduled_status(chat_id, collector, scheduled_time):
+    # Уведомление появляется только после полного сбора данных.
+    with _refresh_lock:
+        try:
+            tz_name = CONFIG.get("timezone", "Europe/Moscow")
+
+            if collector == "finance":
+                data = get_financial_status(CONFIG)
+                data = _apply_payment_dates(data)
+            elif collector == "ads":
+                data = get_items_status(CONFIG)
+            else:
+                data = get_status(CONFIG)
+                data = _apply_payment_dates(data)
+
+            fetched_at = datetime.now(ZoneInfo(tz_name)).strftime("%d.%m.%Y %H:%M")
+
+            if collector == "full":
+                save_cached_status(data, fetched_at)
+
+            message = telegram_api(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": _scheduled_status_text(data, fetched_at, collector),
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": "true",
+                },
+            )
+            delete_message_later(chat_id, message["message_id"])
+
+            print(
+                f"Scheduled notification sent: chat={chat_id}, "
+                f"collector={collector}, time={scheduled_time}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"SCHEDULED NOTIFICATION ERROR chat={chat_id}, "
+                f"collector={collector}, time={scheduled_time}: {exc}",
+                flush=True,
+            )
+
+
+def _notification_scheduler_loop():
+    """
+    Проверяет расписания каждые 15 секунд.
+    Каждый тип сборщика имеет собственные дни, времена и флаг enabled.
+    """
+    while True:
+        try:
+            tz_name = CONFIG.get("timezone", "Europe/Moscow")
+            now = datetime.now(ZoneInfo(tz_name))
+            all_settings = _load_notify_settings()
+            changed = False
+
+            for chat_key, raw_settings in list(all_settings.items()):
+                settings, migrated = _migrate_chat_notify_settings(raw_settings)
+                if migrated:
+                    all_settings[chat_key] = settings
+                    changed = True
+
+                for collector in NOTIFY_COLLECTORS:
+                    cfg = _collector_cfg(settings, collector)
+
+                    if not cfg.get("enabled"):
+                        continue
+
+                    days = set(cfg.get("days") or [])
+                    times = cfg.get("times") or []
+
+                    if now.weekday() not in days or not times:
+                        continue
+
+                    last_sent = cfg.setdefault("last_sent", {})
+                    today_str = now.date().isoformat()
+
+                    for time_str in times:
+                        try:
+                            hh, mm = [int(x) for x in time_str.split(":", 1)]
+                            scheduled_dt = now.replace(
+                                hour=hh,
+                                minute=mm,
+                                second=0,
+                                microsecond=0,
+                            )
+                        except Exception:
+                            continue
+
+                        seconds_late = (now - scheduled_dt).total_seconds()
+                        if not (0 <= seconds_late < 180):
+                            continue
+
+                        if last_sent.get(time_str) == today_str:
+                            continue
+
+                        last_sent[time_str] = today_str
+                        changed = True
+
+                        try:
+                            chat_id = int(chat_key)
+                        except ValueError:
+                            chat_id = chat_key
+
+                        threading.Thread(
+                            target=_send_scheduled_status,
+                            args=(chat_id, collector, time_str),
+                            daemon=True,
+                        ).start()
+
+            if changed:
+                _save_notify_settings(all_settings)
+
+        except Exception as exc:
+            print("NOTIFICATION SCHEDULER ERROR:", exc, flush=True)
+
+        time.sleep(15)
+
+
+def _start_notification_scheduler():
+    thread = threading.Thread(
+        target=_notification_scheduler_loop,
+        daemon=True,
+    )
+    thread.start()
+
+
