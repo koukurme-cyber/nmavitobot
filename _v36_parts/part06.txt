@@ -1,3 +1,15 @@
+                        continue
+
+                    if last_sent.get(time_str) == today_str:
+                        continue
+
+                    # Отмечаем до отправки, чтобы параллельный цикл не дал дубль.
+                    last_sent[time_str] = today_str
+                    changed = True
+                    try:
+                        chat_id = int(chat_key)
+                    except ValueError:
+                        chat_id = chat_key
 
                     threading.Thread(
                         target=_send_scheduled_status,
@@ -45,6 +57,46 @@ def _handle_notify_callback(callback):
             days.add(day)
         settings["days"] = sorted(days)
 
+    elif data.startswith("notify:time:"):
+        raw = data.rsplit(":", 1)[1]
+        if len(raw) != 4 or not raw.isdigit():
+            return
+        value = f"{raw[:2]}:{raw[2:]}"
+        try:
+            value = _normalize_times([value])[0]
+        except Exception:
+            return
+
+        times = list(settings.get("times") or [])
+        if value in times:
+            times.remove(value)
+        else:
+            if len(times) >= 8:
+                telegram_api(
+                    "answerCallbackQuery",
+                    {
+                        "callback_query_id": callback["id"],
+                        "text": "Можно выбрать не больше 8 вариантов времени.",
+                        "show_alert": "true",
+                    },
+                )
+                return
+            times.append(value)
+        settings["times"] = sorted(times)
+
+    elif data == "notify:clear_times":
+        settings["times"] = []
+
+    elif data == "notify:noop":
+        try:
+            telegram_api(
+                "answerCallbackQuery",
+                {"callback_query_id": callback["id"]},
+            )
+        except Exception:
+            pass
+        return
+
     elif data == "notify:weekdays":
         settings["days"] = [0, 1, 2, 3, 4]
     elif data == "notify:all_days":
@@ -90,7 +142,7 @@ def _handle_notify_callback(callback):
 
 
 
-DELETE_PRESETS = [5, 10, 20, 30, 60, 120]
+DELETE_PRESETS = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180]
 
 
 def _delete_after_text(settings):
@@ -101,11 +153,12 @@ def _delete_after_text(settings):
         current = f"{minutes} мин."
 
     return (
-        "<b>АВИТО · АВТОУДАЛЕНИЕ</b>\n\n"
+        "<b>АВИТО · ВРЕМЯ ПОКАЗА СООБЩЕНИЙ</b>\n\n"
         f"Сейчас: {current}\n\n"
-        "Выберите вариант кнопкой ниже или задайте своё значение:\n"
-        "<code>/delete_after 45</code>\n\n"
-        "<code>/delete_after 0</code> — не удалять автоматически."
+        "Просто нажмите нужное время ниже.\n"
+        "Настройка применяется к новым ответам бота и новым командам пользователя.\n\n"
+        "Для нестандартного значения остаётся команда:\n"
+        "/delete_after 75"
     )
 
 
@@ -122,7 +175,9 @@ def _delete_after_keyboard(settings):
     return {
         "inline_keyboard": [
             buttons[:3],
-            buttons[3:],
+            buttons[3:6],
+            buttons[6:9],
+            buttons[9:],
             [{
                 "text": ("✅ " if current == 0 else "") + "Не удалять",
                 "callback_data": "delete:0",
@@ -166,73 +221,3 @@ def _handle_delete_callback(callback):
         return
 
     all_settings, settings = _get_chat_notify_settings(chat_id)
-    settings["delete_after_minutes"] = minutes
-    all_settings[str(chat_id)] = settings
-    _save_notify_settings(all_settings)
-
-    try:
-        telegram_api(
-            "answerCallbackQuery",
-            {"callback_query_id": callback["id"]},
-        )
-    except Exception:
-        pass
-
-    try:
-        telegram_api(
-            "editMessageText",
-            {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": _delete_after_text(settings),
-                "parse_mode": "HTML",
-                "reply_markup": json.dumps(
-                    _delete_after_keyboard(settings),
-                    ensure_ascii=False,
-                ),
-            },
-        )
-    except Exception as exc:
-        if "message is not modified" not in str(exc).lower():
-            print("DELETE SETTINGS EDIT ERROR:", exc, flush=True)
-
-
-ACCOUNT_COMMAND_SUFFIXES = {
-    "aggregaty": "aggregaty",
-    "avmex": "avmex",
-    "orange": "nm_orange",
-    "blue": "nm_blue",
-    "tir": "tir",
-}
-
-
-def _parse_direct_command(command):
-    """
-    Команды только в прямом формате:
-    /status_avmex
-    /balance_avmex
-    /ads_avmex
-    и *_all для всех аккаунтов.
-    """
-    if command == "/status_all":
-        return "full", None
-    if command == "/balance_all":
-        return "finance", None
-    if command == "/ads_all":
-        return "ads", None
-
-    for suffix, seller_key in ACCOUNT_COMMAND_SUFFIXES.items():
-        if command == f"/status_{suffix}":
-            return "full", seller_key
-        if command == f"/balance_{suffix}":
-            return "finance", seller_key
-        if command == f"/ads_{suffix}":
-            return "ads", seller_key
-
-    return None, None
-
-
-def _commands_help():
-    return (
-        "<b>Команды</b>\n\n"
-    
