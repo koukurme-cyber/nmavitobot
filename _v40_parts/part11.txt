@@ -1,0 +1,67 @@
+                        {"command": "status_avmex", "description": "Всё: Авмекс"},
+                        {"command": "balance_avmex", "description": "Баланс: Авмекс"},
+                        {"command": "ads_avmex", "description": "Объявления: Авмекс"},
+
+                        {"command": "status_orange", "description": "Всё: НМ оранжевые"},
+                        {"command": "balance_orange", "description": "Баланс: НМ оранжевые"},
+                        {"command": "ads_orange", "description": "Объявления: НМ оранжевые"},
+
+                        {"command": "status_blue", "description": "Всё: НМ синие"},
+                        {"command": "balance_blue", "description": "Баланс: НМ синие"},
+                        {"command": "ads_blue", "description": "Объявления: НМ синие"},
+
+                        {"command": "status_tir", "description": "Всё: ТИР"},
+                        {"command": "balance_tir", "description": "Баланс: ТИР"},
+                        {"command": "ads_tir", "description": "Объявления: ТИР"},
+
+                        {"command": "notify", "description": "Настроить автоматические уведомления"},
+                        {"command": "notify_times", "description": "Задать до 8 времён уведомлений"},
+                        {"command": "delete_after", "description": "Настроить автоудаление сообщений"},
+                        {"command": "commands", "description": "Показать список команд"},
+                    ],
+                    ensure_ascii=False,
+                )
+            },
+        )
+    except Exception as exc:
+        print("Command setup warning:", exc, flush=True)
+
+    _start_delete_queue_worker()
+    _start_notification_scheduler()
+
+    offset = None
+
+    while True:
+        try:
+            params = {
+                "timeout": 50,
+                "allowed_updates": json.dumps(["message", "callback_query"]),
+            }
+            if offset is not None:
+                params["offset"] = offset
+
+            updates = telegram_api("getUpdates", params)
+
+            for update in updates:
+                offset = update["update_id"] + 1
+                if update.get("callback_query"):
+                    callback = update["callback_query"]
+                    data = callback.get("data") or ""
+                    if data.startswith("help:"):
+                        _handle_help_callback(callback)
+                    elif data.startswith("delete:"):
+                        _handle_delete_callback(callback)
+                    else:
+                        _handle_notify_callback(callback)
+                else:
+                    handle_update(update)
+
+        except KeyboardInterrupt:
+            break
+        except Exception as exc:
+            print("ERROR:", exc, flush=True)
+            time.sleep(3)
+
+
+if __name__ == "__main__":
+    main()
