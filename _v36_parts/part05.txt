@@ -187,8 +187,3 @@ def _notification_scheduler_loop():
                         chat_id = int(chat_key)
                     except ValueError:
                         chat_id = chat_key
-
-                    threading.Thread(
-                        target=_send_scheduled_status,
-                        args=(chat_id, time_str),
-                       
