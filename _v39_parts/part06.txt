@@ -1,0 +1,215 @@
+            "callback_data": f"notify:add:{collector}",
+        }])
+
+    rows.extend([
+        [{
+            "text": "🔔 Включено" if enabled else "🔕 Выключено",
+            "callback_data": f"notify:toggle:{collector}",
+        }],
+        [{
+            "text": "← К типам сборщиков",
+            "callback_data": "notify:home",
+        }],
+    ])
+
+    return {"inline_keyboard": rows}
+
+
+def _get_pending_time_input(settings):
+    pending = settings.get("pending_time_input")
+    return pending if isinstance(pending, dict) else None
+
+
+def _set_pending_time_input(
+    settings,
+    collector,
+    menu_message_id,
+    edit_index=None,
+    prompt_message_id=None,
+):
+    settings["pending_time_input"] = {
+        "collector": collector,
+        "menu_message_id": menu_message_id,
+        "edit_index": edit_index,
+        "prompt_message_id": prompt_message_id,
+        "created_at": int(time.time()),
+    }
+
+
+def _clear_pending_time_input(settings):
+    settings.pop("pending_time_input", None)
+
+
+def _time_input_prompt_text(collector, edit_index=None):
+    meta = NOTIFY_COLLECTORS[collector]
+    action = "Новое время" if edit_index is None else "Новое значение времени"
+
+    return (
+        f"<b>АВИТО · {html.escape(meta['title'].upper())}</b>\n\n"
+        f"{action}: введите время одним сообщением в формате <b>ЧЧ:ММ</b>.\n\n"
+        "Например: <code>09:15</code>\n"
+        "Для отмены отправьте <code>отмена</code>."
+    )
+
+
+def _send_time_input_prompt(chat_id, collector, menu_message_id, edit_index=None):
+    all_settings, settings = _get_chat_notify_settings(chat_id)
+
+    prompt = telegram_api(
+        "sendMessage",
+        {
+            "chat_id": chat_id,
+            "text": _time_input_prompt_text(collector, edit_index),
+            "parse_mode": "HTML",
+            "reply_markup": json.dumps(
+                {
+                    "force_reply": True,
+                    "selective": True,
+                    "input_field_placeholder": "Например 09:15",
+                },
+                ensure_ascii=False,
+            ),
+        },
+    )
+
+    _set_pending_time_input(
+        settings,
+        collector=collector,
+        menu_message_id=menu_message_id,
+        edit_index=edit_index,
+        prompt_message_id=prompt["message_id"],
+    )
+    all_settings[str(chat_id)] = settings
+    _save_notify_settings(all_settings)
+
+    delete_message_later(chat_id, prompt["message_id"])
+    return prompt
+
+
+def _parse_direct_time(value):
+    value = (value or "").strip()
+    try:
+        parsed = datetime.strptime(value, "%H:%M")
+    except ValueError:
+        return None
+    return parsed.strftime("%H:%M")
+
+
+def _handle_pending_time_input(message):
+    chat_id = (message.get("chat") or {}).get("id")
+    if chat_id is None:
+        return False
+
+    all_settings, settings = _get_chat_notify_settings(chat_id)
+    pending = _get_pending_time_input(settings)
+    if not pending:
+        return False
+
+    text = (message.get("text") or "").strip()
+    collector = pending.get("collector")
+    menu_message_id = pending.get("menu_message_id")
+    edit_index = pending.get("edit_index")
+    prompt_message_id = pending.get("prompt_message_id")
+
+    if collector not in NOTIFY_COLLECTORS:
+        _clear_pending_time_input(settings)
+        all_settings[str(chat_id)] = settings
+        _save_notify_settings(all_settings)
+        return False
+
+    if text.casefold() in {"отмена", "cancel", "/cancel"}:
+        _clear_pending_time_input(settings)
+        all_settings[str(chat_id)] = settings
+        _save_notify_settings(all_settings)
+
+        try:
+            if prompt_message_id:
+                telegram_api(
+                    "deleteMessage",
+                    {"chat_id": chat_id, "message_id": prompt_message_id},
+                )
+        except Exception:
+            pass
+
+        delete_message_later(chat_id, message["message_id"], delay=1)
+
+        if menu_message_id:
+            _edit_notify_message(
+                chat_id,
+                menu_message_id,
+                _collector_text(settings, collector),
+                _collector_keyboard(settings, collector),
+            )
+        return True
+
+    value = _parse_direct_time(text)
+    if not value:
+        error = telegram_api(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": (
+                    "Неверный формат. Введите время как <b>09:15</b> "
+                    "или отправьте <b>отмена</b>."
+                ),
+                "parse_mode": "HTML",
+                "reply_markup": json.dumps(
+                    {
+                        "force_reply": True,
+                        "selective": True,
+                        "input_field_placeholder": "ЧЧ:ММ",
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        )
+        pending["prompt_message_id"] = error["message_id"]
+        settings["pending_time_input"] = pending
+        all_settings[str(chat_id)] = settings
+        _save_notify_settings(all_settings)
+
+        delete_message_later(chat_id, message["message_id"], delay=1)
+        delete_message_later(chat_id, error["message_id"])
+        return True
+
+    cfg = _collector_cfg(settings, collector)
+    times = list(cfg.get("times") or [])
+
+    if edit_index is not None:
+        try:
+            edit_index = int(edit_index)
+        except Exception:
+            edit_index = None
+
+    if edit_index is not None and 0 <= edit_index < len(times):
+        times[edit_index] = value
+    elif value not in times:
+        if len(times) >= 8:
+            warning = telegram_api(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": "Для этого сборщика уже сохранено 8 времён.",
+                },
+            )
+            delete_message_later(chat_id, warning["message_id"])
+            delete_message_later(chat_id, message["message_id"], delay=1)
+            return True
+        times.append(value)
+
+    cfg["times"] = sorted(set(times))
+    _clear_pending_time_input(settings)
+
+    all_settings[str(chat_id)] = settings
+    _save_notify_settings(all_settings)
+
+    try:
+        if prompt_message_id:
+            telegram_api(
+                "deleteMessage",
+                {"chat_id": chat_id, "message_id": prompt_message_id},
+            )
+    except Exception:
+        pass
+
+    # Введённое пользователем время убираем почти сразу.
