@@ -55,14 +55,14 @@ def _notify_settings_text(settings):
     time_text = ", ".join(times) if times else "не выбрано"
 
     return (
-        "<b>АВИТО · УВЕДОМЛЕНИЯ</b>\\n\\n"
-        f"Статус: {'включены' if enabled else 'выключены'}\\n"
-        f"Дни: {day_text}\\n"
-        f"Время: {time_text}\\n"
-        f"Часовой пояс: {html.escape(CONFIG.get('timezone', 'Europe/Moscow'))}\\n\\n"
-        "Дни и стандартное время выбираются кнопками ниже.\\n"
-        "Можно выбрать до 8 вариантов времени.\\n\\n"
-        "Для нестандартного времени остаётся команда:\\n"
+        "<b>АВИТО · УВЕДОМЛЕНИЯ</b>\n\n"
+        f"Статус: {'включены' if enabled else 'выключены'}\n"
+        f"Дни: {day_text}\n"
+        f"Время: {time_text}\n"
+        f"Часовой пояс: {html.escape(CONFIG.get('timezone', 'Europe/Moscow'))}\n\n"
+        "Дни и стандартное время выбираются кнопками ниже.\n"
+        "Можно выбрать до 8 вариантов времени.\n\n"
+        "Для нестандартного времени остаётся команда:\n"
         "/notify_times 09:15 13:40 18:25"
     )
 
@@ -184,3 +184,4 @@ def _notification_scheduler_loop():
                         continue
 
                     seconds_late = (now - scheduled_dt).total_seconds()
+                    if not (0 <= seconds_late < 180):
