@@ -1,0 +1,213 @@
+import html
+import json
+import os
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from avito_provider import get_financial_status, get_items_status, get_status
+
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+DATA_DIR = Path(os.getenv("DATA_DIR", os.path.join(BASE_DIR, "data")))
+CACHE_PATH = DATA_DIR / "status_cache.json"
+PAYMENT_STATE_PATH = DATA_DIR / "payment_state.json"
+NOTIFY_SETTINGS_PATH = DATA_DIR / "notification_settings.json"
+DELETE_QUEUE_PATH = DATA_DIR / "message_delete_queue.json"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+_refresh_lock = threading.Lock()
+_keyboard_cleared_chats = set()
+DEFAULT_DELETE_AFTER_MINUTES = 20
+APP_VERSION = "v36"
+
+TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError("Не найден BOT_TOKEN")
+
+API = f"https://api.telegram.org/bot{TOKEN}"
+
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    CONFIG = json.load(f)
+
+
+def telegram_api(method, data=None):
+    body = urllib.parse.urlencode(data or {}).encode("utf-8")
+    request = urllib.request.Request(f"{API}/{method}", data=body)
+
+    try:
+        with urllib.request.urlopen(request, timeout=70) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Telegram API {exc.code}: {raw[:500]}") from exc
+
+    if not payload.get("ok"):
+        raise RuntimeError(payload)
+
+    return payload["result"]
+
+
+def money(value):
+    if value is None:
+        return "—"
+    try:
+        return f"{int(round(float(value))):,}".replace(",", " ") + " ₽"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def plain_number(value):
+    if value is None:
+        return "—"
+    try:
+        return f"{int(round(float(value))):,}".replace(",", " ")
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def short_date(value):
+    if not value:
+        return "—"
+    return str(value)
+
+
+def _seller_short_name(seller):
+    return seller.get("short_name") or {
+        "aggregaty": "Агрегаты",
+        "avmex": "Авмекс",
+        "nm_orange": "НМ оранж.",
+        "nm_blue": "НМ синие",
+        "tir": "ТИР",
+    }.get(seller.get("key"), seller.get("name", seller.get("key", "—")))
+
+
+def _pre(lines):
+    return "<pre>" + html.escape("\n".join(lines)) + "</pre>"
+
+
+def _format_table(headers, rows, aligns=None):
+    rows = [[str(cell) for cell in row] for row in rows]
+    headers = [str(cell) for cell in headers]
+    widths = []
+    for i, header in enumerate(headers):
+        widths.append(max([len(header)] + [len(row[i]) for row in rows if i < len(row)]))
+
+    def format_row(row):
+        cells = []
+        for i, width in enumerate(widths):
+            cell = row[i] if i < len(row) else ""
+            align = aligns[i] if aligns and i < len(aligns) else "left"
+            cells.append(cell.rjust(width) if align == "right" else cell.ljust(width))
+        return "  ".join(cells).rstrip()
+
+    return [format_row(headers), format_row(["─" * w for w in widths])] + [
+        format_row(row) for row in rows
+    ]
+
+
+def _financial_rows(sellers):
+    rows = []
+    for seller in sellers:
+        if seller.get("error"):
+            rows.append([_seller_short_name(seller), "ошибка", "—", "—"])
+            continue
+        advance = plain_number(seller.get("advance")) if seller.get("financial_mode") != "placements" else "—"
+        placements = plain_number(seller.get("placements_remaining")) if seller.get("financial_mode") == "placements" else "—"
+        rows.append([
+            _seller_short_name(seller),
+            plain_number(seller.get("wallet")),
+            advance,
+            placements,
+        ])
+    return rows
+
+
+def _ads_rows(sellers):
+    rows = []
+    for seller in sellers:
+        stats = seller.get("ads") or {}
+        if seller.get("error"):
+            rows.append([_seller_short_name(seller), "ошибка", "—", "—", "—", "—"])
+            continue
+        rows.append([
+            _seller_short_name(seller),
+            plain_number(stats.get("published")),
+            plain_number(stats.get("rejected")),
+            plain_number(stats.get("blocked")),
+            plain_number(stats.get("removed")),
+            plain_number(stats.get("old")),
+        ])
+    return rows
+
+
+def _period_rows(sellers):
+    rows = []
+    for seller in sellers:
+        if seller.get("error"):
+            continue
+        end_date = seller.get("subscription_end") or seller.get("tariff_end")
+        payment = seller.get("subscription_next_payment") or seller.get("next_tariff") or {}
+        next_date = payment.get("date") if isinstance(payment, dict) else None
+        amount = payment.get("amount") if isinstance(payment, dict) else None
+        if end_date or next_date or amount is not None:
+            rows.append([
+                _seller_short_name(seller),
+                short_date(end_date),
+                short_date(next_date),
+                plain_number(amount),
+            ])
+    return rows
+
+
+def _updated_line(fetched_at=None):
+    if fetched_at:
+        return f"Обновлено: {html.escape(str(fetched_at))}"
+    tz_name = CONFIG.get("timezone", "Europe/Moscow")
+    now = datetime.now(ZoneInfo(tz_name)).strftime("%d.%m.%Y %H:%M")
+    return f"Обновлено: {now}"
+
+
+
+
+
+def _parse_payment_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value), "%d.%m.%Y").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_payment_state():
+    try:
+        if not PAYMENT_STATE_PATH.exists():
+            return {}
+        with PAYMENT_STATE_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        print("PAYMENT STATE READ ERROR:", exc, flush=True)
+        return {}
+
+
+def _save_payment_state(state):
+    tmp_path = PAYMENT_STATE_PATH.with_suffix(".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        tmp_path.replace(PAYMENT_STATE_PATH)
+    except Exception as exc:
