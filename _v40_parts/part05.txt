@@ -1,0 +1,206 @@
+    v38 moves it into collectors.full and keeps finance/ads disabled.
+    """
+    if not isinstance(current, dict):
+        return _default_notify_settings(), True
+
+    changed = False
+
+    if "collectors" not in current:
+        old_enabled = bool(current.get("enabled", False))
+        old_days = current.get("days", [0, 1, 2, 3, 4, 5, 6])
+        old_times = current.get("times", [])
+        old_last_sent = current.get("last_sent", {})
+
+        current["collectors"] = {
+            "full": {
+                "enabled": old_enabled,
+                "days": old_days if isinstance(old_days, list) else [0, 1, 2, 3, 4, 5, 6],
+                "times": old_times if isinstance(old_times, list) else [],
+                "last_sent": old_last_sent if isinstance(old_last_sent, dict) else {},
+            },
+            "finance": _default_collector_settings(),
+            "ads": _default_collector_settings(),
+        }
+
+        for legacy_key in ("enabled", "days", "times", "last_sent"):
+            current.pop(legacy_key, None)
+        changed = True
+
+    collectors = current.setdefault("collectors", {})
+    for key in NOTIFY_COLLECTORS:
+        cfg = collectors.get(key)
+        if not isinstance(cfg, dict):
+            collectors[key] = _default_collector_settings()
+            changed = True
+            continue
+
+        defaults = _default_collector_settings()
+        for field, default_value in defaults.items():
+            if field not in cfg:
+                cfg[field] = default_value.copy() if isinstance(default_value, (list, dict)) else default_value
+                changed = True
+
+    if "delete_after_minutes" not in current:
+        current["delete_after_minutes"] = DEFAULT_DELETE_AFTER_MINUTES
+        changed = True
+
+    if not isinstance(current.get("alarm_editor"), dict):
+        current["alarm_editor"] = {}
+        changed = True
+
+    return current, changed
+
+
+def _get_chat_notify_settings(chat_id):
+    all_settings = _load_notify_settings()
+    key = str(chat_id)
+    current = all_settings.get(key)
+
+    current, changed = _migrate_chat_notify_settings(current)
+    all_settings[key] = current
+
+    if changed:
+        _save_notify_settings(all_settings)
+
+    return all_settings, current
+
+
+def _normalize_times(values):
+    result = []
+    for value in values:
+        value = str(value).strip()
+        try:
+            parsed = datetime.strptime(value, "%H:%M")
+        except ValueError:
+            raise ValueError(f"Неверное время: {value}. Нужен формат ЧЧ:ММ.")
+        normalized = parsed.strftime("%H:%M")
+        if normalized not in result:
+            result.append(normalized)
+
+    if len(result) > 8:
+        raise ValueError("Для одного типа сборщика можно выбрать не больше 8 вариантов времени.")
+
+    return sorted(result)
+
+
+def _collector_cfg(settings, collector):
+    collectors = settings.setdefault("collectors", {})
+    cfg = collectors.get(collector)
+    if not isinstance(cfg, dict):
+        cfg = _default_collector_settings()
+        collectors[collector] = cfg
+    return cfg
+
+
+def _days_text(days):
+    days = sorted(set(days or []))
+    if not days:
+        return "не выбраны"
+    return ", ".join(DAY_LABELS[i] for i in days if 0 <= i <= 6)
+
+
+def _times_text(times):
+    return ", ".join(times or []) if times else "не выбрано"
+
+
+def _notify_overview_text(settings):
+    lines = [
+        "<b>АВИТО · УВЕДОМЛЕНИЯ</b>",
+        "",
+        "У каждого типа сборщика теперь своё расписание:",
+        "",
+    ]
+
+    for collector, meta in NOTIFY_COLLECTORS.items():
+        cfg = _collector_cfg(settings, collector)
+        state = "вкл." if cfg.get("enabled") else "выкл."
+        lines.append(
+            f"{meta['emoji']} <b>{html.escape(meta['title'])}</b> — {state}"
+        )
+        lines.append(f"Дни: {_days_text(cfg.get('days'))}")
+        lines.append(f"Время: {_times_text(cfg.get('times'))}")
+        lines.append("")
+
+    lines.append(
+        f"Часовой пояс: {html.escape(CONFIG.get('timezone', 'Europe/Moscow'))}"
+    )
+    lines.append("")
+    lines.append("Выберите тип сборщика кнопкой ниже.")
+
+    return "\n".join(lines)
+
+
+def _notify_overview_keyboard(settings):
+    rows = []
+    for collector, meta in NOTIFY_COLLECTORS.items():
+        cfg = _collector_cfg(settings, collector)
+        marker = "🔔" if cfg.get("enabled") else "🔕"
+        rows.append([{
+            "text": f"{marker} {meta['title']}",
+            "callback_data": f"notify:collector:{collector}",
+        }])
+
+    return {
+        "inline_keyboard": rows + [[
+            {"text": "Закрыть", "callback_data": "notify:close"}
+        ]]
+    }
+
+
+def _collector_text(settings, collector):
+    meta = NOTIFY_COLLECTORS[collector]
+    cfg = _collector_cfg(settings, collector)
+    enabled = bool(cfg.get("enabled"))
+
+    return (
+        f"<b>АВИТО · {html.escape(meta['title'].upper())}</b>\n\n"
+        f"Статус: {'включены' if enabled else 'выключены'}\n"
+        f"Дни: {_days_text(cfg.get('days'))}\n"
+        f"Время: {_times_text(cfg.get('times'))}\n\n"
+        "Чтобы добавить время, нажмите «➕ Добавить время» и просто введите его "
+        "в формате ЧЧ:ММ, например 09:15.\n"
+        "Для этого типа сборщика можно сохранить до 8 времён."
+    )
+
+
+def _collector_keyboard(settings, collector):
+    cfg = _collector_cfg(settings, collector)
+    selected_days = set(cfg.get("days") or [])
+    times = cfg.get("times") or []
+
+    day_buttons = []
+    for i, label in enumerate(DAY_LABELS):
+        day_buttons.append({
+            "text": ("✅ " if i in selected_days else "") + label,
+            "callback_data": f"notify:day:{collector}:{i}",
+        })
+
+    time_rows = []
+    for index, value in enumerate(times):
+        time_rows.append([
+            {
+                "text": f"⏰ {value}",
+                "callback_data": f"notify:edit:{collector}:{index}",
+            },
+            {
+                "text": "✕",
+                "callback_data": f"notify:del:{collector}:{index}",
+            },
+        ])
+
+    enabled = bool(cfg.get("enabled"))
+    rows = [
+        day_buttons[:4],
+        day_buttons[4:],
+        [
+            {"text": "Будни", "callback_data": f"notify:weekdays:{collector}"},
+            {"text": "Все дни", "callback_data": f"notify:all_days:{collector}"},
+            {"text": "Без дней", "callback_data": f"notify:no_days:{collector}"},
+        ],
+    ]
+
+    rows.extend(time_rows)
+
+    if len(times) < 8:
+        rows.append([{
+            "text": "➕ Добавить время",
