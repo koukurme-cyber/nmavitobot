@@ -1,0 +1,209 @@
+    except Exception as exc:
+        print("PAYMENT STATE WRITE ERROR:", exc, flush=True)
+
+
+def _bootstrap_payment_state_from_status_cache(state):
+    # При первом запуске v33 пытаемся забрать даты из старого status_cache.json.
+    cached = load_cached_status()
+    if not cached:
+        return state
+
+    changed = False
+    for seller in (cached.get("data") or {}).get("sellers") or []:
+        if not isinstance(seller, dict):
+            continue
+
+        key = seller.get("key")
+        if not key or key in state:
+            continue
+
+        payment = seller.get("subscription_next_payment") or seller.get("next_tariff")
+        if not isinstance(payment, dict) or not payment.get("date"):
+            continue
+
+        state[key] = {
+            "date": payment.get("date"),
+            "amount": payment.get("amount"),
+            "source": "status_cache",
+        }
+        changed = True
+
+    if changed:
+        _save_payment_state(state)
+
+    return state
+
+
+def _seller_config_by_key(key):
+    for seller in CONFIG.get("sellers", []):
+        if seller.get("key") == key:
+            return seller
+    return {}
+
+
+def _apply_payment_dates(data):
+    """
+    Устойчивое отображение даты регулярного платежа.
+
+    Если Avito отдаёт дату — сохраняем её.
+    Если дата временно исчезла — используем последнюю известную.
+    Если известная дата уже прошла, а новой даты/операции нет —
+    показываем "Платёж не подтверждён".
+    """
+    state = _bootstrap_payment_state_from_status_cache(_load_payment_state())
+    tz_name = CONFIG.get("timezone", "Europe/Moscow")
+    today = datetime.now(ZoneInfo(tz_name)).date()
+    changed = False
+
+    for seller in data.get("sellers", []):
+        if not isinstance(seller, dict) or seller.get("error"):
+            continue
+
+        key = seller.get("key")
+        mode = seller.get("financial_mode")
+        payment_key = (
+            "next_tariff"
+            if mode == "placements"
+            else "subscription_next_payment"
+        )
+
+        payment = seller.get(payment_key)
+        if not isinstance(payment, dict):
+            payment = {}
+
+        api_date = payment.get("date")
+        api_amount = payment.get("amount")
+        stored = state.get(key) if isinstance(state.get(key), dict) else {}
+        config = _seller_config_by_key(key)
+
+        # Новая дата из API всегда заменяет сохранённую.
+        if api_date:
+            if (
+                stored.get("date") != api_date
+                or (
+                    api_amount is not None
+                    and stored.get("amount") != api_amount
+                )
+            ):
+                state[key] = {
+                    "date": api_date,
+                    "amount": api_amount,
+                    "source": "api",
+                }
+                stored = state[key]
+                changed = True
+
+        else:
+            fallback_date = stored.get("date")
+            fallback_amount = stored.get("amount")
+
+            # Миграционный seed используется только когда истории ещё нет,
+            # а Avito уже перестал отдавать дату.
+            if not fallback_date:
+                seed = config.get("payment_date_seed")
+                if seed:
+                    fallback_date = seed
+                    fallback_amount = (
+                        api_amount
+                        if api_amount is not None
+                        else config.get("payment_amount_seed")
+                    )
+                    state[key] = {
+                        "date": fallback_date,
+                        "amount": fallback_amount,
+                        "source": "seed",
+                    }
+                    stored = state[key]
+                    changed = True
+
+            if fallback_date:
+                payment = dict(payment)
+                payment["date"] = fallback_date
+                if api_amount is None and fallback_amount is not None:
+                    payment["amount"] = fallback_amount
+                payment["date_fallback"] = True
+                seller[payment_key] = payment
+
+        effective = seller.get(payment_key)
+        if isinstance(effective, dict):
+            effective_date = effective.get("date")
+            effective_amount = effective.get("amount")
+
+            if effective_date and key in state:
+                if (
+                    effective_amount is not None
+                    and state[key].get("amount") != effective_amount
+                ):
+                    state[key]["amount"] = effective_amount
+                    changed = True
+
+            due = _parse_payment_date(effective_date)
+            if due:
+                days_left = (due - today).days
+                if days_left < 0:
+                    effective["payment_status"] = "unconfirmed"
+                elif days_left <= 3:
+                    effective["payment_status"] = "soon"
+                else:
+                    effective["payment_status"] = "normal"
+
+        print(
+            f"Payment date v33 {key}: "
+            f"api_date={api_date!r}, "
+            f"effective={seller.get(payment_key)!r}, "
+            f"stored={state.get(key)!r}",
+            flush=True,
+        )
+
+    if changed:
+        _save_payment_state(state)
+
+    return data
+
+
+def _regular_payment_line(payment):
+    if not isinstance(payment, dict) or not payment:
+        return None
+
+    date = payment.get("date")
+    amount = payment.get("amount")
+    status = payment.get("payment_status")
+
+    parts = []
+    if date:
+        parts.append(html.escape(str(date)))
+    if amount is not None:
+        if parts:
+            parts.append("—")
+        parts.append(money(amount))
+
+    if not parts:
+        return None
+
+    if status == "unconfirmed":
+        return f"🔴 <b>Платёж не подтверждён: {' '.join(parts)}</b>"
+
+    text = "Регулярный платёж: " + " ".join(parts)
+
+    if status == "soon":
+        return f"🔴 <b>{text}</b>"
+
+    return text
+
+
+def _seller_full_block(seller):
+    name = html.escape(seller.get("name") or _seller_short_name(seller))
+
+    if seller.get("error"):
+        return f"<b>{name}</b>\nОшибка: {html.escape(str(seller['error']))}"
+
+    stats = seller.get("ads") or {}
+    lines = [f"<b>{name}</b>"]
+
+    lines.append(f"Кошелёк: {money(seller.get('wallet'))}")
+
+    if seller.get("financial_mode") == "placements":
+        if seller.get("placements_remaining") is not None:
+            lines.append(
+                f"Остаток размещений: {plain_number(seller.get('placements_remaining'))}"
+            )
