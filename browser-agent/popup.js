@@ -50,11 +50,29 @@ async function refresh() {
   }
 }
 
+function sendMessageWithTimeout(message, timeoutMs = 18000) {
+  return Promise.race([
+    chrome.runtime.sendMessage(message),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Проверка превысила 18 секунд")), timeoutMs)
+    )
+  ]);
+}
+
 document.getElementById("checkNow").addEventListener("click", async () => {
   const button = document.getElementById("checkNow");
   button.disabled = true;
   button.textContent = "Проверяю…";
-  await chrome.runtime.sendMessage({type: "RUN_CHECK"});
+
+  try {
+    await sendMessageWithTimeout({type: "RUN_CHECK"});
+  } catch (error) {
+    await chrome.storage.local.set({
+      lastCheckAt: new Date().toISOString(),
+      lastError: String(error?.message || error)
+    });
+  }
+
   await refresh();
   button.disabled = false;
   button.textContent = "Проверить сейчас";
