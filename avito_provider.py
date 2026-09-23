@@ -663,6 +663,59 @@ def get_subscription_details(seller, token, timezone_name):
     }
 
 
+
+def run_cpa_threshold_probe(config):
+    """
+    Лёгкая проверка только найденного web-endpoint, без кошелька,
+    истории операций и обхода объявлений.
+    Запускается фоном при старте бота, чтобы результат сразу был в логах.
+    """
+    sellers = [
+        seller for seller in config.get("sellers", [])
+        if seller.get("financial_mode", "advance") == "advance"
+    ]
+
+    print(
+        "CPA threshold startup probe v43: "
+        + ", ".join(seller.get("key", "?") for seller in sellers),
+        flush=True,
+    )
+
+    def probe_one(seller):
+        key = seller["key"]
+        prefix = seller["env_prefix"]
+        try:
+            client_id = env(prefix + "_CLIENT_ID")
+            client_secret = env(prefix + "_CLIENT_SECRET")
+            token = get_token(key, client_id, client_secret)
+            return key, get_cpa_web_profile_diag(key, token), None
+        except Exception as exc:
+            return key, None, str(exc)
+
+    workers = max(1, min(len(sellers), 3))
+    with ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix="cpa-threshold-probe",
+    ) as pool:
+        futures = [pool.submit(probe_one, seller) for seller in sellers]
+        for future in as_completed(futures):
+            key, value, error = future.result()
+            if error:
+                print(
+                    f"CPA threshold startup probe v43 {key}: ERROR {error}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"CPA threshold startup probe v43 {key}: "
+                    f"status={value.get('http_status')!r}, "
+                    f"advanceThreshold={value.get('advance_threshold')!r}, "
+                    f"advanceBalance={value.get('advance_balance')!r}, "
+                    f"cpaAlert={value.get('cpa_alert')!r}",
+                    flush=True,
+                )
+
+
 def get_seller_finances(seller, timezone_name):
     key = seller["key"]
     prefix = seller["env_prefix"]
