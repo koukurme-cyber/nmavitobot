@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Avito CPA Watch</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="popup">
+  <main>
+    <h1>Avito CPA Watch</h1>
+    <div id="statusCard" class="card">
+      <div class="row"><span>Аккаунт</span><strong id="accountLabel">—</strong></div>
+      <div class="row"><span>Аванс</span><strong id="balance">—</strong></div>
+      <div class="row"><span>Порог</span><strong id="threshold">—</strong></div>
+      <div class="row"><span>Состояние</span><strong id="state">—</strong></div>
+      <div class="row"><span>Источник</span><strong id="source">—</strong></div>
+      <div class="row"><span>Проверено</span><strong id="checkedAt">—</strong></div>
+      <div id="error" class="error hidden"></div>
+    </div>
+
+    <div class="actions">
+      <button id="checkNow">Проверить сейчас</button>
+      <button id="openOptions" class="secondary">Настройки</button>
+    </div>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
