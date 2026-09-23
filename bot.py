@@ -1,4 +1,13 @@
 from pathlib import Path
+import threading
+
+from auction_probe import run_auction_probe
+
+threading.Thread(
+    target=run_auction_probe,
+    daemon=True,
+    name="auction-probe-v45",
+).start()
 
 _PARTS_DIR = Path(__file__).with_name("_v41_parts")
 _SOURCE = "".join(
