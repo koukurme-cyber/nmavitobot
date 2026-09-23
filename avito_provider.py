@@ -9,12 +9,14 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 BASE_URL = "https://api.avito.ru"
+WEB_BASE_URL = "https://www.avito.ru"
 
 _token_cache = {}
 _advance_cache = {}
 _items_cache = {}
 _tariff_cache = {}
 _subscription_ops_cache = {}
+_cpa_web_profile_cache = {}
 
 
 def env(name):
@@ -86,6 +88,106 @@ def request_json(
                 continue
 
             raise RuntimeError(f"Avito API {exc.code}: {raw[:500]}") from exc
+
+
+
+def request_web_json_raw(path, token=None, timeout=20):
+    """
+    Диагностический запрос к внутреннему web-endpoint Avito Pro.
+    Никакие cookie браузера не используются: только тот же OAuth Bearer,
+    которым бот ходит в api.avito.ru.
+    Возвращает (status, parsed_json_or_none, raw_prefix).
+    """
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "avito-telegram-status-bot/1.0",
+        "X-Source": "avito-telegram-status-bot",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    request = urllib.request.Request(
+        WEB_BASE_URL + path,
+        headers=headers,
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            data = None
+            try:
+                data = json.loads(raw) if raw else {}
+            except Exception:
+                pass
+            return int(response.status), data, raw[:500]
+
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        data = None
+        try:
+            data = json.loads(raw) if raw else {}
+        except Exception:
+            pass
+        return int(exc.code), data, raw[:500]
+
+    except Exception as exc:
+        return None, None, str(exc)[:500]
+
+
+def get_cpa_web_profile_diag(account_key, token):
+    """
+    Проверяет найденный в HAR источник динамического порога показов:
+      GET /web/3/tariff/cpa/profile?entryPoint=desktop_profile
+
+    В HAR Avito возвращал:
+      result.advanceThreshold — порог в копейках
+      result.advanceBalance   — текущий аванс в копейках
+      result.cpaAlert         — состояние CPA/показов
+
+    Пока функция только диагностическая: пользовательский вывод не меняет.
+    """
+    now = time.time()
+    cached = _cpa_web_profile_cache.get(account_key)
+    if cached and cached["expires_at"] > now:
+        return cached["value"]
+
+    path = "/web/3/tariff/cpa/profile?entryPoint=desktop_profile"
+    status, data, raw_prefix = request_web_json_raw(path, token=token)
+
+    result_obj = {}
+    if isinstance(data, dict):
+        candidate = data.get("result")
+        if isinstance(candidate, dict):
+            result_obj = candidate
+
+    threshold = result_obj.get("advanceThreshold")
+    balance = result_obj.get("advanceBalance")
+    cpa_alert = result_obj.get("cpaAlert")
+
+    print(
+        f"CPA web threshold v42 {account_key}: "
+        f"status={status!r}, "
+        f"advanceThreshold={threshold!r}, "
+        f"advanceBalance={balance!r}, "
+        f"cpaAlert={cpa_alert!r}, "
+        f"top_keys={list(data.keys()) if isinstance(data, dict) else []}, "
+        f"result_keys={list(result_obj.keys())[:30]}, "
+        f"raw_prefix={raw_prefix!r}",
+        flush=True,
+    )
+
+    value = {
+        "http_status": status,
+        "advance_threshold": threshold,
+        "advance_balance": balance,
+        "cpa_alert": cpa_alert,
+    }
+    _cpa_web_profile_cache[account_key] = {
+        "value": value,
+        "expires_at": now + 60,
+    }
+    return value
 
 
 def get_token(account_key, client_id, client_secret):
@@ -604,6 +706,19 @@ def get_seller_finances(seller, timezone_name):
             result["advance"] = get_advance(key, token)
         except Exception as exc:
             result["warnings"].append(f"аванс: {exc}")
+
+        # v42: только диагностика найденного в HAR динамического порога.
+        # В пользовательский вывод ничего не добавляем, пока не подтвердим,
+        # что внутренний web-endpoint принимает OAuth Bearer без browser cookies.
+        try:
+            web_diag = get_cpa_web_profile_diag(key, token)
+            result["advance_threshold_diag"] = web_diag.get("advance_threshold")
+            result["cpa_alert_diag"] = web_diag.get("cpa_alert")
+        except Exception as exc:
+            print(
+                f"CPA web threshold v42 failed for {key}: {exc}",
+                flush=True,
+            )
 
         try:
             subscription = get_subscription_details(seller, token, timezone_name)
