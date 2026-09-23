@@ -7,9 +7,9 @@ import urllib.request
 from pathlib import Path
 
 BASE_URL = "https://api.avito.ru"
-PROBE_VERSION = "v45"
-MAX_PAGES = 10
-BATCH_SIZE = 200
+PROBE_VERSION = "v46"
+MAX_ACTIVE_ITEMS = 200
+DETAILS_PER_ACCOUNT = 4
 
 
 def _request_json(method, path, token=None, data=None, headers=None, timeout=25):
@@ -37,14 +37,20 @@ def _request_json(method, path, token=None, data=None, headers=None, timeout=25)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8", errors="replace")
-            return response.status, json.loads(raw) if raw else {}
+            try:
+                payload = json.loads(raw) if raw else {}
+            except Exception:
+                payload = {"raw": raw[:500]}
+            return int(response.status), payload
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
         try:
             payload = json.loads(raw) if raw else {}
         except Exception:
             payload = {"raw": raw[:500]}
-        return exc.code, payload
+        return int(exc.code), payload
+    except Exception as exc:
+        return None, {"error": str(exc)}
 
 
 def _get_token(client_id, client_secret):
@@ -63,134 +69,6 @@ def _get_token(client_id, client_secret):
     return payload["access_token"]
 
 
-def _numeric_values(values):
-    result = []
-    for value in values:
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, (int, float)):
-            result.append(int(value))
-    return result
-
-
-def _compact_unique(values, limit=40):
-    uniq = sorted(set(_numeric_values(values)))
-    if len(uniq) <= limit:
-        return uniq
-    return uniq[:limit] + [f"... +{len(uniq) - limit}"]
-
-
-def _balance_v3(token):
-    return _request_json(
-        "POST",
-        "/cpa/v3/balanceInfo",
-        token=token,
-        data={},
-        headers={"X-Source": "nmavitobot-auction-probe"},
-    )
-
-
-def _auction_pages(token):
-    all_items = []
-    cursor = 0
-    statuses = []
-
-    for page_no in range(1, MAX_PAGES + 1):
-        query = urllib.parse.urlencode(
-            {"fromItemID": cursor, "batchSize": BATCH_SIZE}
-        )
-        status, payload = _request_json(
-            "GET",
-            f"/auction/1/bids?{query}",
-            token=token,
-        )
-        statuses.append(status)
-
-        if status != 200:
-            return statuses, all_items, payload
-
-        items = payload.get("items") if isinstance(payload, dict) else None
-        if not isinstance(items, list):
-            return statuses, all_items, {
-                "error": "unexpected payload",
-                "payload": payload,
-            }
-
-        all_items.extend(items)
-
-        if len(items) < BATCH_SIZE:
-            return statuses, all_items, None
-
-        last_id = items[-1].get("itemID") if items and isinstance(items[-1], dict) else None
-        if not isinstance(last_id, int) or last_id <= cursor:
-            return statuses, all_items, {
-                "error": "pagination cursor did not advance",
-                "last_id": last_id,
-                "cursor": cursor,
-            }
-        cursor = last_id
-
-    return statuses, all_items, {
-        "warning": f"stopped after {MAX_PAGES} pages"
-    }
-
-
-def _summarize_auction(items):
-    current_prices = []
-    available_prices = []
-    per_item_min_available = []
-    per_item_max_available = []
-    null_current = 0
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-
-        current = item.get("pricePenny")
-        if isinstance(current, (int, float)) and not isinstance(current, bool):
-            current_prices.append(int(current))
-        else:
-            null_current += 1
-
-        available = item.get("availablePrices")
-        if not isinstance(available, list):
-            continue
-
-        prices = []
-        for option in available:
-            if not isinstance(option, dict):
-                continue
-            price = option.get("pricePenny")
-            if isinstance(price, (int, float)) and not isinstance(price, bool):
-                value = int(price)
-                prices.append(value)
-                available_prices.append(value)
-
-        if prices:
-            per_item_min_available.append(min(prices))
-            per_item_max_available.append(max(prices))
-
-    def extrema(values):
-        return {
-            "min": min(values) if values else None,
-            "max": max(values) if values else None,
-        }
-
-    return {
-        "items": len(items),
-        "current_count": len(current_prices),
-        "current_null": null_current,
-        "current_extrema": extrema(current_prices),
-        "current_unique": _compact_unique(current_prices),
-        "available_count": len(available_prices),
-        "available_extrema": extrema(available_prices),
-        "available_unique": _compact_unique(available_prices),
-        "max_of_item_min_available": max(per_item_min_available) if per_item_min_available else None,
-        "min_of_item_min_available": min(per_item_min_available) if per_item_min_available else None,
-        "max_of_item_max_available": max(per_item_max_available) if per_item_max_available else None,
-    }
-
-
 def _extract_balance(payload):
     if not isinstance(payload, dict):
         return None
@@ -202,18 +80,226 @@ def _extract_balance(payload):
     return None
 
 
+def _balance_v3(token):
+    return _request_json(
+        "POST",
+        "/cpa/v3/balanceInfo",
+        token=token,
+        data={},
+        headers={"X-Source": "nmavitobot-cpxpromo-probe"},
+    )
+
+
+def _item_id(item):
+    if not isinstance(item, dict):
+        return None
+    for key in ("id", "item_id", "itemId", "itemID"):
+        value = item.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
+
+
+def _active_item_ids(token):
+    ids = []
+    page = 1
+    statuses = []
+
+    while len(ids) < MAX_ACTIVE_ITEMS:
+        query = urllib.parse.urlencode({
+            "status": "active",
+            "page": page,
+            "per_page": 99,
+        })
+        status, payload = _request_json(
+            "GET",
+            f"/core/v1/items?{query}",
+            token=token,
+        )
+        statuses.append(status)
+
+        if status != 200 or not isinstance(payload, dict):
+            return statuses, ids, payload
+
+        resources = payload.get("resources")
+        if not isinstance(resources, list):
+            return statuses, ids, {
+                "error": "unexpected items payload",
+                "keys": list(payload.keys()),
+            }
+
+        for item in resources:
+            value = _item_id(item)
+            if value is not None:
+                ids.append(value)
+                if len(ids) >= MAX_ACTIVE_ITEMS:
+                    break
+
+        if len(resources) < 99:
+            break
+
+        page += 1
+        if page > 10:
+            break
+        time.sleep(0.4)
+
+    return statuses, ids, None
+
+
+def _promotions(token, item_ids):
+    if not item_ids:
+        return None, {"items": []}
+
+    return _request_json(
+        "POST",
+        "/cpxpromo/1/getPromotionsByItemIds",
+        token=token,
+        data={"itemIDs": item_ids[:200]},
+    )
+
+
+def _numeric_unique(values):
+    result = []
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            result.append(int(value))
+    return sorted(set(result))
+
+
+def _summarize_promotions(payload):
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return {
+            "items": 0,
+            "manual_count": 0,
+            "auto_count": 0,
+            "manual_bids": [],
+            "records": [],
+        }
+
+    manual_bids = []
+    records = []
+    manual_count = 0
+    auto_count = 0
+
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+
+        item_id = _item_id(row)
+        manual = row.get("manualPromotion")
+        auto = row.get("autoPromotion")
+
+        manual_bid = None
+        if isinstance(manual, dict):
+            manual_count += 1
+            value = manual.get("bidPenny")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                manual_bid = int(value)
+                manual_bids.append(manual_bid)
+
+        if isinstance(auto, dict):
+            auto_count += 1
+
+        records.append({
+            "item_id": item_id,
+            "manual_bid": manual_bid,
+            "action_type": row.get("actionTypeID"),
+        })
+
+    return {
+        "items": len(items),
+        "manual_count": manual_count,
+        "auto_count": auto_count,
+        "manual_bids": _numeric_unique(manual_bids),
+        "records": records,
+    }
+
+
+def _select_detail_ids(active_ids, summary):
+    records = [
+        row for row in summary.get("records", [])
+        if isinstance(row.get("item_id"), int)
+    ]
+
+    selected = []
+    with_bid = [row for row in records if isinstance(row.get("manual_bid"), int)]
+
+    if with_bid:
+        ordered = sorted(with_bid, key=lambda row: row["manual_bid"])
+        candidates = [ordered[-1], ordered[0]]
+        if len(ordered) > 2:
+            candidates += [ordered[len(ordered)//2]]
+        candidates += list(reversed(ordered))
+        for row in candidates:
+            item_id = row["item_id"]
+            if item_id not in selected:
+                selected.append(item_id)
+            if len(selected) >= DETAILS_PER_ACCOUNT:
+                return selected
+
+    for item_id in active_ids:
+        if item_id not in selected:
+            selected.append(item_id)
+        if len(selected) >= DETAILS_PER_ACCOUNT:
+            break
+
+    return selected
+
+
+def _detail(token, item_id):
+    return _request_json(
+        "GET",
+        f"/cpxpromo/1/getBids/{item_id}",
+        token=token,
+    )
+
+
+def _detail_summary(payload):
+    if not isinstance(payload, dict):
+        return {}
+
+    manual = payload.get("manual")
+    if not isinstance(manual, dict):
+        manual = {}
+
+    bids = manual.get("bids")
+    bid_values = []
+    if isinstance(bids, list):
+        for bid in bids:
+            if not isinstance(bid, dict):
+                continue
+            value = bid.get("valuePenny")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                bid_values.append(int(value))
+
+    return {
+        "selected": payload.get("selectedType"),
+        "action_type": payload.get("actionTypeID"),
+        "manual_bid": manual.get("bidPenny"),
+        "min_bid": manual.get("minBidPenny"),
+        "rec_bid": manual.get("recBidPenny"),
+        "max_bid": manual.get("maxBidPenny"),
+        "bid_values": _numeric_unique(bid_values),
+    }
+
+
 def _probe_account(seller):
     key = seller.get("key", "?")
     prefix = seller.get("env_prefix")
     if not prefix:
-        print(f"Auction probe {PROBE_VERSION} {key}: missing env_prefix", flush=True)
+        print(f"Cpx probe {PROBE_VERSION} {key}: missing env_prefix", flush=True)
         return
 
     client_id = os.getenv(prefix + "_CLIENT_ID")
     client_secret = os.getenv(prefix + "_CLIENT_SECRET")
     if not client_id or not client_secret:
         print(
-            f"Auction probe {PROBE_VERSION} {key}: "
+            f"Cpx probe {PROBE_VERSION} {key}: "
             f"missing {prefix}_CLIENT_ID/CLIENT_SECRET",
             flush=True,
         )
@@ -222,48 +308,60 @@ def _probe_account(seller):
     try:
         token = _get_token(client_id, client_secret)
     except Exception as exc:
-        print(f"Auction probe {PROBE_VERSION} {key}: token ERROR {exc}", flush=True)
+        print(f"Cpx probe {PROBE_VERSION} {key}: token ERROR {exc}", flush=True)
         return
 
     balance_status, balance_payload = _balance_v3(token)
-    balance = _extract_balance(balance_payload)
     print(
-        f"Auction probe {PROBE_VERSION} {key}: "
-        f"cpa_v3_status={balance_status}, balance={balance!r}, "
-        f"cpa_v3_keys={list(balance_payload.keys()) if isinstance(balance_payload, dict) else []}",
+        f"Cpx probe {PROBE_VERSION} {key}: "
+        f"cpa_v3_status={balance_status}, "
+        f"balance={_extract_balance(balance_payload)!r}",
         flush=True,
     )
 
-    statuses, items, auction_error = _auction_pages(token)
-    if not statuses or statuses[-1] != 200:
-        print(
-            f"Auction probe {PROBE_VERSION} {key}: "
-            f"auction_statuses={statuses}, auction_error={auction_error}",
-            flush=True,
-        )
+    item_statuses, active_ids, items_error = _active_item_ids(token)
+    print(
+        f"Cpx probe {PROBE_VERSION} {key}: "
+        f"active_item_statuses={item_statuses}, "
+        f"active_items={len(active_ids)}, "
+        f"items_error={items_error!r}",
+        flush=True,
+    )
+    if not active_ids:
         return
 
-    summary = _summarize_auction(items)
+    promo_status, promo_payload = _promotions(token, active_ids)
+    summary = _summarize_promotions(promo_payload)
+    manual_bids = summary["manual_bids"]
     print(
-        f"Auction probe {PROBE_VERSION} {key}: "
-        f"auction_statuses={statuses}, "
-        f"items={summary['items']}, "
-        f"current_count={summary['current_count']}, "
-        f"current_null={summary['current_null']}, "
-        f"current_min={summary['current_extrema']['min']!r}, "
-        f"current_max={summary['current_extrema']['max']!r}, "
-        f"max_item_min_available={summary['max_of_item_min_available']!r}, "
-        f"min_item_min_available={summary['min_of_item_min_available']!r}, "
-        f"max_item_max_available={summary['max_of_item_max_available']!r}, "
-        f"auction_error={auction_error!r}",
+        f"Cpx probe {PROBE_VERSION} {key}: "
+        f"promotions_status={promo_status}, "
+        f"promotion_items={summary['items']}, "
+        f"manual_count={summary['manual_count']}, "
+        f"auto_count={summary['auto_count']}, "
+        f"manual_min={manual_bids[0] if manual_bids else None!r}, "
+        f"manual_max={manual_bids[-1] if manual_bids else None!r}, "
+        f"manual_unique={manual_bids[:30]}",
         flush=True,
     )
-    print(
-        f"Auction probe {PROBE_VERSION} {key}: "
-        f"current_unique={summary['current_unique']}, "
-        f"available_unique={summary['available_unique']}",
-        flush=True,
-    )
+
+    for item_id in _select_detail_ids(active_ids, summary):
+        status, payload = _detail(token, item_id)
+        detail = _detail_summary(payload)
+        print(
+            f"Cpx probe {PROBE_VERSION} {key} item={item_id}: "
+            f"status={status}, "
+            f"selected={detail.get('selected')!r}, "
+            f"actionTypeID={detail.get('action_type')!r}, "
+            f"manual_bid={detail.get('manual_bid')!r}, "
+            f"min_bid={detail.get('min_bid')!r}, "
+            f"rec_bid={detail.get('rec_bid')!r}, "
+            f"max_bid={detail.get('max_bid')!r}, "
+            f"bid_values={detail.get('bid_values')!r}, "
+            f"payload_keys={list(payload.keys()) if isinstance(payload, dict) else []}",
+            flush=True,
+        )
+        time.sleep(0.6)
 
 
 def run_auction_probe():
@@ -279,7 +377,7 @@ def run_auction_probe():
         ]
 
         print(
-            f"Auction probe {PROBE_VERSION} started: "
+            f"Cpx probe {PROBE_VERSION} started: "
             + ", ".join(seller.get("key", "?") for seller in sellers),
             flush=True,
         )
@@ -288,7 +386,7 @@ def run_auction_probe():
             _probe_account(seller)
             time.sleep(1)
 
-        print(f"Auction probe {PROBE_VERSION} completed", flush=True)
+        print(f"Cpx probe {PROBE_VERSION} completed", flush=True)
 
     except Exception as exc:
-        print(f"Auction probe {PROBE_VERSION} fatal ERROR: {exc}", flush=True)
+        print(f"Cpx probe {PROBE_VERSION} fatal ERROR: {exc}", flush=True)
