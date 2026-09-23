@@ -1,11 +1,9 @@
-const AVITO_URL = "https://www.avito.ru/web/3/tariff/cpa/profile?entryPoint=desktop_profile";
+const AVITO_PATH = "/web/3/tariff/cpa/profile?entryPoint=desktop_profile";
+const AVITO_URL = "https://www.avito.ru" + AVITO_PATH;
 const ALARM_NAME = "avito-cpa-watch";
 const DEFAULT_INTERVAL_MIN = 1;
 
-const STOP_CODES = new Set([
-  "CPA_NOT_ENOUGH_ADVANCE",
-  "CPA_VIEWS_PAUSED"
-]);
+const STOP_CODES = new Set(["CPA_NOT_ENOUGH_ADVANCE", "CPA_VIEWS_PAUSED"]);
 
 async function getLocal(keys) {
   return await chrome.storage.local.get(keys);
@@ -27,18 +25,17 @@ function formatRubKopeks(value) {
 function findObjectWithKeys(root) {
   const queue = [root];
   const seen = new Set();
-
   while (queue.length) {
     const value = queue.shift();
     if (!value || typeof value !== "object") continue;
     if (seen.has(value)) continue;
     seen.add(value);
 
-    const hasThreshold = Object.prototype.hasOwnProperty.call(value, "advanceThreshold");
-    const hasBalance = Object.prototype.hasOwnProperty.call(value, "advanceBalance");
-    const hasAlert = Object.prototype.hasOwnProperty.call(value, "cpaAlert");
-
-    if (hasThreshold || hasBalance || hasAlert) {
+    if (
+      Object.prototype.hasOwnProperty.call(value, "advanceThreshold") ||
+      Object.prototype.hasOwnProperty.call(value, "advanceBalance") ||
+      Object.prototype.hasOwnProperty.call(value, "cpaAlert")
+    ) {
       return value;
     }
 
@@ -54,12 +51,6 @@ function findObjectWithKeys(root) {
 function extractAlertCode(alertValue) {
   if (!alertValue) return null;
   if (typeof alertValue === "string") return alertValue;
-
-  const preferredKeys = ["code", "type", "name", "kind", "status"];
-  for (const key of preferredKeys) {
-    const v = alertValue?.[key];
-    if (typeof v === "string" && v.startsWith("CPA_")) return v;
-  }
 
   const queue = [alertValue];
   const seen = new Set();
@@ -80,7 +71,7 @@ function extractAlertCode(alertValue) {
 function parseAvitoPayload(payload) {
   const holder = findObjectWithKeys(payload);
   if (!holder) {
-    throw new Error("В ответе Avito не найдены advanceThreshold / advanceBalance / cpaAlert");
+    throw new Error("В ответе Avito нет advanceThreshold / advanceBalance / cpaAlert");
   }
 
   const advanceThreshold = holder.advanceThreshold ?? null;
@@ -103,86 +94,123 @@ function parseAvitoPayload(payload) {
     advanceBalance,
     cpaAlert,
     cpaAlertCode,
-    stopped: stoppedByBalance || stoppedByCode,
-    stoppedByBalance,
-    stoppedByCode
+    stopped: stoppedByBalance || stoppedByCode
   };
 }
 
-async function backgroundFetchAvito() {
-  const response = await fetch(AVITO_URL, {
-    method: "GET",
-    credentials: "include",
-    headers: {
-      "Accept": "application/json, text/plain, */*"
-    },
-    cache: "no-store"
-  });
-
-  const text = await response.text();
-  let payload = null;
-  try {
-    payload = JSON.parse(text);
-  } catch (_) {}
-
-  return {
-    status: response.status,
-    ok: response.ok,
-    payload,
-    text: text.slice(0, 500),
-    source: "background"
-  };
-}
-
-async function tabFetchAvito() {
+async function fetchThroughAvitoTab() {
   const tabs = await chrome.tabs.query({url: ["https://www.avito.ru/*"]});
   if (!tabs.length) {
-    throw new Error("Нет открытой вкладки Avito для резервной проверки");
+    throw new Error("Нет открытой вкладки Avito");
   }
+
+  let lastError = "";
 
   for (const tab of tabs) {
+    if (!tab.id) continue;
+
     try {
-      const reply = await chrome.tabs.sendMessage(tab.id, {
-        type: "AVITO_CPA_FETCH"
+      const injected = await chrome.scripting.executeScript({
+        target: {tabId: tab.id},
+        func: async (path) => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 12000);
+
+          try {
+            const response = await fetch(path, {
+              method: "GET",
+              credentials: "include",
+              cache: "no-store",
+              headers: {"Accept": "application/json, text/plain, */*"},
+              signal: controller.signal
+            });
+
+            const text = await response.text();
+            let payload = null;
+            try {
+              payload = JSON.parse(text);
+            } catch (_) {}
+
+            return {
+              ok: response.ok,
+              status: response.status,
+              payload,
+              text: text.slice(0, 500)
+            };
+          } catch (error) {
+            return {
+              ok: false,
+              status: 0,
+              payload: null,
+              text: String(error?.message || error)
+            };
+          } finally {
+            clearTimeout(timer);
+          }
+        },
+        args: [AVITO_PATH]
       });
-      if (reply && typeof reply.status === "number") {
-        return {
-          status: reply.status,
-          ok: reply.ok,
-          payload: reply.payload ?? null,
-          text: reply.text ?? "",
-          source: "avito-tab"
-        };
+
+      const reply = injected?.[0]?.result;
+      if (reply?.ok) {
+        return {...reply, source: "avito-tab"};
       }
-    } catch (_) {}
+
+      lastError = reply
+        ? `HTTP ${reply.status}: ${reply.text || "без текста"}`
+        : "вкладка не вернула ответ";
+    } catch (error) {
+      lastError = String(error?.message || error);
+    }
   }
 
-  throw new Error("Не удалось выполнить проверку через открытую вкладку Avito");
+  throw new Error(`Проверка через вкладку Avito не удалась: ${lastError}`);
+}
+
+async function fetchFromExtension() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+
+  try {
+    const response = await fetch(AVITO_URL, {
+      method: "GET",
+      credentials: "include",
+      cache: "no-store",
+      headers: {"Accept": "application/json, text/plain, */*"},
+      signal: controller.signal
+    });
+
+    const text = await response.text();
+    let payload = null;
+    try {
+      payload = JSON.parse(text);
+    } catch (_) {}
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      payload,
+      text: text.slice(0, 500),
+      source: "background"
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function fetchAvitoState() {
-  let first = null;
-
   try {
-    first = await backgroundFetchAvito();
-    if (first.ok) return first;
-  } catch (error) {
-    first = {status: null, ok: false, text: String(error), source: "background"};
-  }
-
-  try {
-    const fallback = await tabFetchAvito();
-    if (fallback.ok) return fallback;
-    throw new Error(`Avito HTTP ${fallback.status}: ${fallback.text || "без текста"}`);
-  } catch (fallbackError) {
-    const firstText = first
-      ? `Фоновая проверка: HTTP ${first.status ?? "—"} ${first.text || ""}`.trim()
-      : "";
-    throw new Error(
-      [firstText, `Через вкладку: ${fallbackError.message}`]
-        .filter(Boolean)
-        .join(" | ")
-    );
+    return await fetchThroughAvitoTab();
+  } catch (tabError) {
+    try {
+      const fallback = await fetchFromExtension();
+      if (fallback.ok) return fallback;
+      throw new Error(`HTTP ${fallback.status}: ${fallback.text || "без текста"}`);
+    } catch (backgroundError) {
+      throw new Error(
+        `${tabError.message} | Фоновая проверка: ${backgroundError.message}`
+      );
+    }
   }
 }
 
@@ -195,24 +223,23 @@ async function sendTelegram(text) {
     throw new Error("Не заполнены Telegram Bot Token и Chat ID");
   }
 
-  const url = `https://api.telegram.org/bot${encodeURIComponent(token)}/sendMessage`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      disable_web_page_preview: true
-    })
-  });
+  const response = await fetch(
+    `https://api.telegram.org/bot${encodeURIComponent(token)}/sendMessage`,
+    {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        disable_web_page_preview: true
+      })
+    }
+  );
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || !payload.ok) {
-    throw new Error(
-      payload?.description || `Telegram HTTP ${response.status}`
-    );
+    throw new Error(payload?.description || `Telegram HTTP ${response.status}`);
   }
-  return true;
 }
 
 function stoppedMessage(accountLabel, state) {
@@ -237,13 +264,7 @@ function recoveredMessage(accountLabel, state) {
 
 async function runCheck({manual = false} = {}) {
   const now = new Date().toISOString();
-  const cfg = await getLocal([
-    "enabled",
-    "accountLabel",
-    "telegramBotToken",
-    "telegramChatId",
-    "lastStopped"
-  ]);
+  const cfg = await getLocal(["enabled", "accountLabel", "lastStopped"]);
 
   if (!manual && cfg.enabled === false) {
     return {ok: true, skipped: true};
@@ -265,24 +286,26 @@ async function runCheck({manual = false} = {}) {
       lastStopped: state.stopped
     });
 
-    if (prevStopped === null && state.stopped) {
-      await sendTelegram(stoppedMessage(cfg.accountLabel, state));
-      await setLocal({lastNotificationAt: now});
-    } else if (prevStopped === false && state.stopped) {
-      await sendTelegram(stoppedMessage(cfg.accountLabel, state));
-      await setLocal({lastNotificationAt: now});
-    } else if (prevStopped === true && !state.stopped) {
-      await sendTelegram(recoveredMessage(cfg.accountLabel, state));
-      await setLocal({lastNotificationAt: now});
+    const tg = await getLocal(["telegramBotToken", "telegramChatId"]);
+    const telegramReady =
+      Boolean((tg.telegramBotToken || "").trim()) &&
+      Boolean((tg.telegramChatId || "").trim());
+
+    if (telegramReady) {
+      if ((prevStopped === null || prevStopped === false) && state.stopped) {
+        await sendTelegram(stoppedMessage(cfg.accountLabel, state));
+        await setLocal({lastNotificationAt: now});
+      } else if (prevStopped === true && !state.stopped) {
+        await sendTelegram(recoveredMessage(cfg.accountLabel, state));
+        await setLocal({lastNotificationAt: now});
+      }
     }
 
     return {ok: true, state, source: raw.source};
   } catch (error) {
-    await setLocal({
-      lastCheckAt: now,
-      lastError: String(error?.message || error)
-    });
-    return {ok: false, error: String(error?.message || error)};
+    const message = String(error?.message || error);
+    await setLocal({lastCheckAt: now, lastError: message});
+    return {ok: false, error: message};
   }
 }
 
@@ -298,31 +321,19 @@ async function resetAlarm() {
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const current = await getLocal([
-    "enabled",
-    "accountLabel",
-    "intervalMinutes"
-  ]);
-
+  const current = await getLocal(["enabled", "accountLabel", "intervalMinutes"]);
   const defaults = {};
   if (typeof current.enabled !== "boolean") defaults.enabled = true;
-  if (!current.accountLabel) defaults.accountLabel = "Агрегаты";
+  if (!current.accountLabel) defaults.accountLabel = "Аккаунт";
   if (!current.intervalMinutes) defaults.intervalMinutes = DEFAULT_INTERVAL_MIN;
   if (Object.keys(defaults).length) await setLocal(defaults);
-
   await resetAlarm();
-  await runCheck();
 });
 
-chrome.runtime.onStartup.addListener(async () => {
-  await resetAlarm();
-  await runCheck();
-});
+chrome.runtime.onStartup.addListener(resetAlarm);
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === ALARM_NAME) {
-    await runCheck();
-  }
+  if (alarm.name === ALARM_NAME) await runCheck();
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
