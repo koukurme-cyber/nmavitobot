@@ -4,15 +4,29 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, timedelta
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 BASE_URL = "https://api.avito.ru"
-PROBE_VERSION = "v47"
+PROBE_VERSION = "v48"
+TIMEZONE = "Europe/Moscow"
 KNOWN_THRESHOLDS_KOPEKS = {
     "aggregaty": 89930,
     "avmex": 5925,
 }
+
+CPA_WORDS = (
+    "cpa",
+    "целев",
+    "просмотр",
+    "клик",
+    "контакт",
+    "звон",
+    "чат",
+    "пакет",
+)
 
 
 def _request_json(method, path, token=None, data=None, headers=None, timeout=25):
@@ -73,17 +87,13 @@ def _get_token(client_id, client_secret):
     return payload["access_token"]
 
 
-def _profile(token):
-    return _request_json("GET", "/core/v1/accounts/self", token=token)
-
-
 def _balance_v3(token):
     return _request_json(
         "POST",
         "/cpa/v3/balanceInfo",
         token=token,
         data={},
-        headers={"X-Source": "nmavitobot-spendings-probe"},
+        headers={"X-Source": "nmavitobot-operations-probe"},
     )
 
 
@@ -101,226 +111,180 @@ def _extract_balance(payload):
     return None
 
 
-def _extract_user_id(profile):
-    if not isinstance(profile, dict):
+def _operations(token, start_dt, end_dt):
+    return _request_json(
+        "POST",
+        "/core/v1/accounts/operations_history/",
+        token=token,
+        data={
+            "dateTimeFrom": start_dt.isoformat(timespec="seconds"),
+            "dateTimeTo": end_dt.isoformat(timespec="seconds"),
+        },
+    )
+
+
+def _extract_operations(payload):
+    if not isinstance(payload, dict):
+        return []
+    result = payload.get("result")
+    if isinstance(result, dict):
+        operations = result.get("operations")
+        if isinstance(operations, list):
+            return operations
+    operations = payload.get("operations")
+    return operations if isinstance(operations, list) else []
+
+
+def _op_text(op):
+    return " ".join(
+        str(op.get(key) or "")
+        for key in (
+            "serviceType",
+            "serviceName",
+            "operationType",
+            "operationName",
+        )
+    ).casefold()
+
+
+def _is_cpa_like(op):
+    text = _op_text(op)
+    return any(word in text for word in CPA_WORDS)
+
+
+def _amount(op):
+    value = op.get("amountRub")
+    if isinstance(value, bool):
         return None
-    for key in ("id", "user_id", "userId"):
-        value = profile.get(key)
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str) and value.isdigit():
-            return int(value)
-    return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
-def _spendings(token, user_id, date_from, date_to):
-    return _request_json(
-        "POST",
-        f"/stats/v2/accounts/{user_id}/spendings",
-        token=token,
-        data={
-            "dateFrom": date_from,
-            "dateTo": date_to,
-            "grouping": "day",
-            "spendingTypes": ["presence"],
-        },
-        headers={"X-AgencyClientId": str(user_id)},
+def _group_key(op):
+    return (
+        str(op.get("serviceType") or ""),
+        str(op.get("serviceName") or ""),
+        str(op.get("operationType") or ""),
+        str(op.get("operationName") or ""),
     )
 
 
-def _metrics(token, user_id, date_from, date_to):
-    return _request_json(
-        "POST",
-        f"/stats/v2/accounts/{user_id}/items",
-        token=token,
-        data={
-            "dateFrom": date_from,
-            "dateTo": date_to,
-            "grouping": "day",
-            "metrics": [
-                "clickPackages",
-                "presenceSpending",
-                "activeItems",
-                "views",
-                "impressions",
-            ],
-        },
-        headers={"X-AgencyClientId": str(user_id)},
-    )
-
-
-def _daily_spendings(payload):
-    result = payload.get("result") if isinstance(payload, dict) else None
-    groupings = result.get("groupings") if isinstance(result, dict) else None
-    if not isinstance(groupings, list):
-        return []
-
-    rows = []
-    for group in groupings:
-        if not isinstance(group, dict):
-            continue
-        row = {
-            "date": group.get("date"),
-            "presence": 0.0,
-            "cpa_click_package": 0.0,
-            "cpa_target_call": 0.0,
-            "cpa_target_chat": 0.0,
-        }
-        spendings = group.get("spendings")
-        if isinstance(spendings, list):
-            for spending in spendings:
-                if not isinstance(spending, dict):
-                    continue
-                if spending.get("slug") == "presence":
-                    try:
-                        row["presence"] = float(spending.get("value") or 0)
-                    except (TypeError, ValueError):
-                        pass
-                services = spending.get("services")
-                if isinstance(services, list):
-                    for service in services:
-                        if not isinstance(service, dict):
-                            continue
-                        slug = service.get("slug")
-                        if slug in row:
-                            try:
-                                row[slug] += float(service.get("value") or 0)
-                            except (TypeError, ValueError):
-                                pass
-        rows.append(row)
-    return rows
-
-
-def _daily_metrics(payload):
-    result = payload.get("result") if isinstance(payload, dict) else None
-    groupings = result.get("groupings") if isinstance(result, dict) else None
-    if not isinstance(groupings, list):
-        return []
-
-    rows = []
-    for group in groupings:
-        if not isinstance(group, dict):
-            continue
-        values = {"id": group.get("id")}
-        metrics = group.get("metrics")
-        if isinstance(metrics, list):
-            for metric in metrics:
-                if isinstance(metric, dict):
-                    values[metric.get("slug")] = metric.get("value")
-        rows.append(values)
-    return rows
-
-
-def _sum_last(rows, key, days):
-    values = rows[-days:] if len(rows) >= days else rows
-    total = 0.0
-    for row in values:
-        try:
-            total += float(row.get(key) or 0)
-        except (TypeError, ValueError):
-            pass
-    return round(total, 2)
+def _compact_group(group):
+    service_type, service_name, operation_type, operation_name = group
+    return {
+        "serviceType": service_type,
+        "serviceName": service_name,
+        "operationType": operation_type,
+        "operationName": operation_name,
+    }
 
 
 def _probe_account(seller):
     key = seller.get("key", "?")
     prefix = seller.get("env_prefix")
     if not prefix:
-        print(f"Spendings probe {PROBE_VERSION} {key}: missing env_prefix", flush=True)
+        print(f"Operations probe {PROBE_VERSION} {key}: missing env_prefix", flush=True)
         return
 
     client_id = os.getenv(prefix + "_CLIENT_ID")
     client_secret = os.getenv(prefix + "_CLIENT_SECRET")
     if not client_id or not client_secret:
-        print(
-            f"Spendings probe {PROBE_VERSION} {key}: missing API credentials",
-            flush=True,
-        )
+        print(f"Operations probe {PROBE_VERSION} {key}: missing API credentials", flush=True)
         return
 
     try:
         token = _get_token(client_id, client_secret)
     except Exception as exc:
-        print(f"Spendings probe {PROBE_VERSION} {key}: token ERROR {exc}", flush=True)
+        print(f"Operations probe {PROBE_VERSION} {key}: token ERROR {exc}", flush=True)
         return
 
-    profile_status, profile_payload = _profile(token)
-    user_id = _extract_user_id(profile_payload)
     balance_status, balance_payload = _balance_v3(token)
     balance = _extract_balance(balance_payload)
+    threshold = KNOWN_THRESHOLDS_KOPEKS.get(key)
 
     print(
-        f"Spendings probe {PROBE_VERSION} {key}: "
-        f"profile_status={profile_status}, user_id={user_id!r}, "
-        f"cpa_v3_status={balance_status}, balance_kopeks={balance!r}",
+        f"Operations probe {PROBE_VERSION} {key}: "
+        f"cpa_v3_status={balance_status}, balance_kopeks={balance!r}, "
+        f"known_threshold_kopeks={threshold!r}",
         flush=True,
     )
 
-    if not user_id:
+    tz = ZoneInfo(TIMEZONE)
+    end_dt = datetime.now(tz)
+    start_dt = end_dt - timedelta(days=2)
+
+    status, payload = _operations(token, start_dt, end_dt)
+    operations = _extract_operations(payload)
+
+    print(
+        f"Operations probe {PROBE_VERSION} {key}: "
+        f"history_status={status}, operations={len(operations)}, "
+        f"payload_keys={list(payload.keys()) if isinstance(payload, dict) else []}",
+        flush=True,
+    )
+
+    if status != 200 or not operations:
         return
 
-    today = date.today()
-    date_from = (today - timedelta(days=13)).isoformat()
-    date_to = today.isoformat()
-
-    spend_status, spend_payload = _spendings(
-        token, user_id, date_from, date_to
-    )
-    rows = _daily_spendings(spend_payload)
+    cpa_ops = [op for op in operations if isinstance(op, dict) and _is_cpa_like(op)]
+    groups = Counter(_group_key(op) for op in operations if isinstance(op, dict))
+    cpa_groups = Counter(_group_key(op) for op in cpa_ops)
 
     print(
-        f"Spendings probe {PROBE_VERSION} {key}: "
-        f"spendings_status={spend_status}, "
-        f"days={len(rows)}, "
-        f"payload_keys={list(spend_payload.keys()) if isinstance(spend_payload, dict) else []}",
+        f"Operations probe {PROBE_VERSION} {key}: "
+        f"cpa_like_operations={len(cpa_ops)}, "
+        f"unique_groups={len(groups)}, cpa_groups={len(cpa_groups)}",
         flush=True,
     )
 
-    if rows:
-        compact = [
-            {
-                "date": row["date"],
-                "presence": row["presence"],
-                "click": row["cpa_click_package"],
-                "call": row["cpa_target_call"],
-                "chat": row["cpa_target_chat"],
-            }
-            for row in rows
-        ]
+    grouped_amounts = defaultdict(list)
+    for op in cpa_ops:
+        amount = _amount(op)
+        if amount is not None:
+            grouped_amounts[_group_key(op)].append(amount)
+
+    for group, count in cpa_groups.most_common(20):
+        amounts = grouped_amounts.get(group, [])
+        unique_amounts = sorted(set(round(x, 2) for x in amounts))
         print(
-            f"Spendings probe {PROBE_VERSION} {key}: daily={compact}",
-            flush=True,
-        )
-        print(
-            f"Spendings probe {PROBE_VERSION} {key}: "
-            f"click_1d={_sum_last(rows, 'cpa_click_package', 1)}, "
-            f"click_3d={_sum_last(rows, 'cpa_click_package', 3)}, "
-            f"click_7d={_sum_last(rows, 'cpa_click_package', 7)}, "
-            f"presence_1d={_sum_last(rows, 'presence', 1)}, "
-            f"presence_3d={_sum_last(rows, 'presence', 3)}, "
-            f"presence_7d={_sum_last(rows, 'presence', 7)}",
+            f"Operations probe {PROBE_VERSION} {key} CPA group: "
+            f"count={count}, fields={_compact_group(group)!r}, "
+            f"amount_min={min(amounts) if amounts else None!r}, "
+            f"amount_max={max(amounts) if amounts else None!r}, "
+            f"amount_unique={unique_amounts[:25]!r}",
             flush=True,
         )
 
-    threshold = KNOWN_THRESHOLDS_KOPEKS.get(key)
-    if threshold is not None:
+    if not cpa_groups:
+        for group, count in groups.most_common(15):
+            print(
+                f"Operations probe {PROBE_VERSION} {key} top group: "
+                f"count={count}, fields={_compact_group(group)!r}",
+                flush=True,
+            )
+
+    recent_cpa = sorted(
+        cpa_ops,
+        key=lambda op: str(op.get("paidAt") or op.get("updatedAt") or ""),
+        reverse=True,
+    )[:20]
+
+    for op in recent_cpa:
         print(
-            f"Spendings probe {PROBE_VERSION} {key}: "
-            f"known_browser_threshold={threshold} kopeks "
-            f"({threshold / 100:.2f} rub)",
+            f"Operations probe {PROBE_VERSION} {key} CPA op: "
+            f"paidAt={op.get('paidAt')!r}, "
+            f"updatedAt={op.get('updatedAt')!r}, "
+            f"serviceType={op.get('serviceType')!r}, "
+            f"serviceName={op.get('serviceName')!r}, "
+            f"operationType={op.get('operationType')!r}, "
+            f"amountRub={op.get('amountRub')!r}, "
+            f"operationName={op.get('operationName')!r}",
             flush=True,
         )
-
-    metrics_status, metrics_payload = _metrics(
-        token, user_id, date_from, date_to
-    )
-    metrics_rows = _daily_metrics(metrics_payload)
-    print(
-        f"Spendings probe {PROBE_VERSION} {key}: "
-        f"metrics_status={metrics_status}, metrics_days={len(metrics_rows)}, "
-        f"metrics={metrics_rows}",
-        flush=True,
-    )
 
 
 def run_auction_probe():
@@ -336,7 +300,7 @@ def run_auction_probe():
         ]
 
         print(
-            f"Spendings probe {PROBE_VERSION} started: "
+            f"Operations probe {PROBE_VERSION} started: "
             + ", ".join(seller.get("key", "?") for seller in sellers),
             flush=True,
         )
@@ -345,7 +309,7 @@ def run_auction_probe():
             _probe_account(seller)
             time.sleep(1)
 
-        print(f"Spendings probe {PROBE_VERSION} completed", flush=True)
+        print(f"Operations probe {PROBE_VERSION} completed", flush=True)
 
     except Exception as exc:
-        print(f"Spendings probe {PROBE_VERSION} fatal ERROR: {exc}", flush=True)
+        print(f"Operations probe {PROBE_VERSION} fatal ERROR: {exc}", flush=True)
