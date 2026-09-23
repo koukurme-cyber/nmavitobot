@@ -72,7 +72,6 @@ function clearError() {
 async function fetchInsidePage(tabId) {
   const execution = chrome.scripting.executeScript({
     target: {tabId},
-    world: "MAIN",
     func: async (path) => {
       try {
         const response = await fetch(path, {
