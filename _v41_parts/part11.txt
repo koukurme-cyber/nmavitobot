@@ -63,6 +63,15 @@
 def main():
     print(f"Bot started {APP_VERSION}", flush=True)
 
+    # Сразу проверяем, принимает ли найденный внутренний Avito Pro endpoint
+    # обычный OAuth Bearer. Проверка идёт фоном и не задерживает Telegram-бота.
+    threading.Thread(
+        target=run_cpa_threshold_probe,
+        args=(CONFIG,),
+        daemon=True,
+        name="cpa-threshold-startup-probe",
+    ).start()
+
     try:
         telegram_api("deleteWebhook", {"drop_pending_updates": "false"})
     except Exception as exc:
