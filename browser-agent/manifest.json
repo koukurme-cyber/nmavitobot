@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Avito CPA Watch",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Следит за динамическим порогом аванса Avito Pro и отправляет тревоги в Telegram.",
-  "permissions": ["storage", "alarms", "tabs"],
+  "permissions": ["storage", "alarms", "tabs", "scripting"],
   "host_permissions": [
     "https://www.avito.ru/*",
     "https://api.telegram.org/*"
