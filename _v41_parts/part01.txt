@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from avito_provider import get_financial_status, get_items_status, get_status
+from avito_provider import get_financial_status, get_items_status, get_status, run_cpa_threshold_probe
 
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -43,7 +43,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 _refresh_lock = threading.Lock()
 _keyboard_cleared_chats = set()
 DEFAULT_DELETE_AFTER_MINUTES = 20
-APP_VERSION = "v42"
+APP_VERSION = "v43"
 
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
