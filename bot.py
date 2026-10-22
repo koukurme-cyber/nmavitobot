@@ -12,7 +12,7 @@ threading.Thread(
 
 threading.Thread(
     target=run_alerts,
-    args=(globals,),
+    args=(globals(),),  # сам словарь bot.py: exec ниже наполнит его функциями бота
     daemon=True,
     name="alerts-v42",
 ).start()
