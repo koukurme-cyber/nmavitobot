@@ -1,10 +1,21 @@
                 save_cached_status(data, fetched_at)
 
+            text = _scheduled_status_text(data, fetched_at, collector)
+        except Exception as exc:
+            print(
+                f"SCHEDULED NOTIFICATION COLLECT ERROR "
+                f"collector={collector}, time={scheduled_time}: {exc}",
+                flush=True,
+            )
+            return
+
+    for chat_id in chat_ids:
+        try:
             message = telegram_api(
                 "sendMessage",
                 {
                     "chat_id": chat_id,
-                    "text": _scheduled_status_text(data, fetched_at, collector),
+                    "text": text,
                     "parse_mode": "HTML",
                     "disable_web_page_preview": "true",
                 },
@@ -26,14 +37,15 @@
                 f"collector={collector}, time={scheduled_time}: {exc}",
                 flush=True,
             )
+            _forget_blocked_chat(chat_id, exc)
 
 
 def _notification_scheduler_loop():
     """
     Фиксированное расписание, только Пн–Пт:
       08:00 -> status_all
-      08:40 -> balance_all
-      10:00..16:00 каждый час -> balance_all
+      08:40, 10:00, 12:00, 14:00, 16:00 -> balance_all
+      данные собираются один раз на слот и рассылаются во все чаты
 
     Пользовательские настройки уведомлений отключены.
     notification_settings.json используется как реестр чатов и для настроек удаления.
@@ -47,6 +59,7 @@ def _notification_scheduler_loop():
                 all_settings = _load_notify_settings()
                 changed = False
                 today_str = now.date().isoformat()
+                due = {}  # (time_str, collector) -> [chat_id, ...]
 
                 for chat_key, raw_settings in list(all_settings.items()):
                     settings, migrated = _migrate_chat_notify_settings(raw_settings)
@@ -84,14 +97,17 @@ def _notification_scheduler_loop():
                         except ValueError:
                             chat_id = chat_key
 
-                        threading.Thread(
-                            target=_send_scheduled_status,
-                            args=(chat_id, collector, time_str),
-                            daemon=True,
-                        ).start()
+                        due.setdefault((time_str, collector), []).append(chat_id)
 
                 if changed:
                     _save_notify_settings(all_settings)
+
+                for (time_str, collector), chat_ids in due.items():
+                    threading.Thread(
+                        target=_send_scheduled_status,
+                        args=(chat_ids, collector, time_str),
+                        daemon=True,
+                    ).start()
 
         except Exception as exc:
             print("FIXED NOTIFICATION SCHEDULER ERROR:", exc, flush=True)

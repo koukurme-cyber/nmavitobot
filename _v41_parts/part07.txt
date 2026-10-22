@@ -194,8 +194,31 @@ def _scheduled_status_text(data, fetched_at, collector):
     return "\n\n".join(blocks)
 
 
-def _send_scheduled_status(chat_id, collector, scheduled_time):
-    # Уведомление появляется только после полного сбора данных.
+BLOCKED_CHAT_MARKERS = (
+    "bot was blocked by the user",
+    "user is deactivated",
+    "bot was kicked",
+    "chat not found",
+)
+
+
+def _forget_blocked_chat(chat_id, exc):
+    """Убрать чат из реестра рассылки, если Telegram говорит, что он недоступен навсегда."""
+    text = str(exc)
+    if "403" not in text and "400" not in text:
+        return
+    if not any(marker in text for marker in BLOCKED_CHAT_MARKERS):
+        return
+    settings = _load_notify_settings()
+    if settings.pop(str(chat_id), None) is not None:
+        _save_notify_settings(settings)
+        print(f"Chat removed from notifications (blocked): {chat_id}", flush=True)
+
+
+def _send_scheduled_status(chat_ids, collector, scheduled_time):
+    # Данные собираются один раз на слот и рассылаются во все чаты.
+    if not isinstance(chat_ids, (list, tuple)):
+        chat_ids = [chat_ids]
     with _refresh_lock:
         try:
             tz_name = CONFIG.get("timezone", "Europe/Moscow")
