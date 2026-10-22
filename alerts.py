@@ -20,7 +20,7 @@ ADS_CHANGE_THRESHOLD = 10         # строго больше -> тревога
 
 MONEY_CHECK_INTERVAL = 30 * 60    # сек
 MONEY_REPEAT_INTERVAL = 3 * 60 * 60
-MONEY_WINDOW = (8, 20)            # проверять с 08:00 до 20:00 по Москве, каждый день
+MONEY_WINDOW = (8, 20)            # проверять с 08:00 до 20:00 по Москве, только Пн–Пт
 
 ADS_CHECK_TIMES = ("09:00", "13:00", "17:00")
 ADS_SLOT_GRACE = 10 * 60          # допустимое опоздание слота (рестарт бота)
@@ -242,6 +242,10 @@ def _alerts_loop(get_globals):
             tz = ZoneInfo(g["CONFIG"].get("timezone", "Europe/Moscow"))
             now = datetime.now(tz)
             now_ts = time.time()
+
+            if now.weekday() >= 5:  # выходные: ничего не проверяем
+                time.sleep(60)
+                continue
 
             if (MONEY_WINDOW[0] <= now.hour < MONEY_WINDOW[1]
                     and now_ts - last_money_check >= MONEY_CHECK_INTERVAL):
