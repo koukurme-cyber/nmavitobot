@@ -230,6 +230,7 @@ def _check_ads(g):
 
 def _alerts_loop(get_globals):
     last_money_check = 0.0
+    ready_logged = False
 
     while True:
         try:
@@ -238,6 +239,9 @@ def _alerts_loop(get_globals):
             if not all(name in g for name in needed):
                 time.sleep(5)  # основной модуль бота ещё загружается
                 continue
+            if not ready_logged:
+                print("Alerts v42 ready", flush=True)
+                ready_logged = True
 
             tz = ZoneInfo(g["CONFIG"].get("timezone", "Europe/Moscow"))
             now = datetime.now(tz)
@@ -278,5 +282,10 @@ def _alerts_loop(get_globals):
         time.sleep(20)
 
 
-def run_alerts(get_globals):
-    _alerts_loop(get_globals)
+def run_alerts(bot_globals):
+    # Передаётся словарь globals() из bot.py. Встроенную globals() сюда
+    # передавать нельзя: вызванная здесь, она вернёт словарь alerts.py.
+    if callable(bot_globals):
+        raise TypeError("run_alerts ждёт словарь globals() из bot.py, а не функцию")
+    print("Alerts v42 started", flush=True)
+    _alerts_loop(lambda: bot_globals)
