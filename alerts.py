@@ -1,4 +1,4 @@
-"""Предупреждения «вне расписания» (v43).
+"""Предупреждения «вне расписания» (v44).
 
 1. Аванс < 1000 ₽ у аккаунтов с авансом (Агрегаты, Авмекс; ТИР исключён), пока показы ещё идут.
 2. Больше 10 объявлений за проверку ушли из публикации или попали в «Отклонено».
@@ -20,9 +20,12 @@ ADS_CHANGE_THRESHOLD = 10         # строго больше -> тревога
 
 MONEY_REPEAT_INTERVAL = 0         # пока аванс ниже порога — напоминать в каждом слоте
 
-# v43: обе проверки — в 10-ю минуту каждого часа, Пн–Пт, с 08:10 до 19:10 МСК.
-CHECK_MINUTE = 10
-CHECK_HOURS = range(8, 20)
+# v44 (Пн–Пт, МСК):
+#   аванс — в 10-ю минуту каждого часа, 08:10–19:10 (лёгкий запрос);
+#   объявления — 2 раза в день (тяжёлый обход всех страниц).
+MONEY_MINUTE = 10
+MONEY_HOURS = range(8, 20)
+ADS_CHECK_TIMES = ("09:30", "14:30")
 SLOT_GRACE = 10 * 60              # допустимое опоздание слота (рестарт бота)
 
 EXCLUDED_SELLERS = {"tir"}        # по ТИР предупреждения не нужны
@@ -202,6 +205,9 @@ def _send(g, text):
             })
         except Exception as exc:
             print(f"ALERT SEND ERROR chat={chat_id}: {exc}", flush=True)
+            forget = g.get("_forget_blocked_chat")
+            if forget:
+                forget(chat_id, exc)
 
 
 # ---------- цикл ----------
@@ -241,6 +247,21 @@ def _check_ads(g):
     print(f"Alerts ads check: {len(alerts)} sent", flush=True)
 
 
+def _due_slot(g, now, slot_dt, state_key):
+    """True, если слот наступил (с допуском) и ещё не отработан. Отмечает его."""
+    late = (now - slot_dt).total_seconds()
+    if not (0 <= late < SLOT_GRACE):
+        return False
+    slot_id = slot_dt.strftime("%Y-%m-%d %H:%M")
+    state = _load_state(g)
+    if state.get(state_key) == slot_id:
+        return False
+    state[state_key] = slot_id
+    _save_state(g, state)
+    print(f"Alerts slot {state_key} {slot_id}", flush=True)
+    return True
+
+
 def _alerts_loop(get_globals):
     ready_logged = False
 
@@ -252,29 +273,29 @@ def _alerts_loop(get_globals):
                 time.sleep(5)  # основной модуль бота ещё загружается
                 continue
             if not ready_logged:
-                print("Alerts v43 ready", flush=True)
+                print("Alerts v44 ready", flush=True)
                 ready_logged = True
 
             tz = ZoneInfo(g["CONFIG"].get("timezone", "Europe/Moscow"))
             now = datetime.now(tz)
 
-            if now.weekday() < 5 and now.hour in CHECK_HOURS:
-                slot_dt = now.replace(minute=CHECK_MINUTE, second=0, microsecond=0)
-                late = (now - slot_dt).total_seconds()
-                slot_id = slot_dt.strftime("%Y-%m-%d %H:%M")
-                state = _load_state(g)
-                if 0 <= late < SLOT_GRACE and state.get("last_slot") != slot_id:
-                    state["last_slot"] = slot_id
-                    _save_state(g, state)
-                    print(f"Alerts slot {slot_id}", flush=True)
-                    try:
-                        _check_money(g, time.time())
-                    except Exception as exc:
-                        print("ALERT MONEY CHECK ERROR:", exc, flush=True)
-                    try:
-                        _check_ads(g)
-                    except Exception as exc:
-                        print("ALERT ADS CHECK ERROR:", exc, flush=True)
+            if now.weekday() < 5:
+                if now.hour in MONEY_HOURS:
+                    slot = now.replace(minute=MONEY_MINUTE, second=0, microsecond=0)
+                    if _due_slot(g, now, slot, "last_money_slot"):
+                        try:
+                            _check_money(g, time.time())
+                        except Exception as exc:
+                            print("ALERT MONEY CHECK ERROR:", exc, flush=True)
+
+                for slot_str in ADS_CHECK_TIMES:
+                    hh, mm = [int(x) for x in slot_str.split(":", 1)]
+                    slot = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                    if _due_slot(g, now, slot, "last_ads_slot"):
+                        try:
+                            _check_ads(g)
+                        except Exception as exc:
+                            print("ALERT ADS CHECK ERROR:", exc, flush=True)
         except Exception as exc:
             print("ALERTS LOOP ERROR:", exc, flush=True)
 
@@ -286,5 +307,5 @@ def run_alerts(bot_globals):
     # передавать нельзя: вызванная здесь, она вернёт словарь alerts.py.
     if callable(bot_globals):
         raise TypeError("run_alerts ждёт словарь globals() из bot.py, а не функцию")
-    print("Alerts v43 started", flush=True)
+    print("Alerts v44 started", flush=True)
     _alerts_loop(lambda: bot_globals)
