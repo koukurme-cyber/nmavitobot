@@ -165,6 +165,7 @@ def _apply_payment_dates(data):
             due = _parse_payment_date(effective_date)
             if due:
                 days_left = (due - today).days
+                effective["days_left"] = days_left
                 if days_left < 0:
                     effective["payment_status"] = "unconfirmed"
                 elif days_left <= 3:

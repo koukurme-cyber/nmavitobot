@@ -1,6 +1,6 @@
-"""Предупреждения «вне расписания» (v42).
+"""Предупреждения «вне расписания» (v43).
 
-1. Аванс < 1000 ₽ у аккаунтов с авансом (Агрегаты, Авмекс, ТИР), пока показы ещё идут.
+1. Аванс < 1000 ₽ у аккаунтов с авансом (Агрегаты, Авмекс; ТИР исключён), пока показы ещё идут.
 2. Больше 10 объявлений за проверку ушли из публикации или попали в «Отклонено».
 
 Модуль запускается потоком из bot.py до загрузки основной логики, поэтому
@@ -18,12 +18,14 @@ from zoneinfo import ZoneInfo
 ADVANCE_THRESHOLD = 1000          # ₽, строго меньше -> тревога
 ADS_CHANGE_THRESHOLD = 10         # строго больше -> тревога
 
-MONEY_CHECK_INTERVAL = 30 * 60    # сек
-MONEY_REPEAT_INTERVAL = 3 * 60 * 60
-MONEY_WINDOW = (8, 20)            # проверять с 08:00 до 20:00 по Москве, только Пн–Пт
+MONEY_REPEAT_INTERVAL = 0         # пока аванс ниже порога — напоминать в каждом слоте
 
-ADS_CHECK_TIMES = ("09:00", "13:00", "17:00")
-ADS_SLOT_GRACE = 10 * 60          # допустимое опоздание слота (рестарт бота)
+# v43: обе проверки — в 10-ю минуту каждого часа, Пн–Пт, с 08:10 до 19:10 МСК.
+CHECK_MINUTE = 10
+CHECK_HOURS = range(8, 20)
+SLOT_GRACE = 10 * 60              # допустимое опоздание слота (рестарт бота)
+
+EXCLUDED_SELLERS = {"tir"}        # по ТИР предупреждения не нужны
 
 STATE_FILE = "alert_state.json"
 
@@ -44,6 +46,8 @@ def evaluate_money(sellers, state, now_ts):
 
     for seller in sellers:
         key = seller.get("key")
+        if key in EXCLUDED_SELLERS:
+            continue
         if seller.get("error") or seller.get("financial_mode") == "placements":
             continue
         advance = seller.get("advance")
@@ -76,6 +80,8 @@ def evaluate_ads(sellers, state):
 
     for seller in sellers:
         key = seller.get("key")
+        if key in EXCLUDED_SELLERS:
+            continue
         if seller.get("error"):
             continue  # базу не трогаем, чтобы не потерять прошлые значения
         stats = seller.get("ads") or {}
@@ -200,12 +206,19 @@ def _send(g, text):
 
 # ---------- цикл ----------
 
+def _alert_config(g):
+    config = g["CONFIG"]
+    return {**config, "sellers": [
+        s for s in config["sellers"] if s.get("key") not in EXCLUDED_SELLERS
+    ]}
+
+
 def _check_money(g, now_ts):
     from avito_provider import get_financial_status
 
     lock = g.get("_refresh_lock") or threading.Lock()
     with lock:
-        data = get_financial_status(g["CONFIG"])
+        data = get_financial_status(_alert_config(g))
     state = _load_state(g)
     alerts, state = evaluate_money(data["sellers"], state, now_ts)
     _save_state(g, state)
@@ -219,7 +232,7 @@ def _check_ads(g):
 
     lock = g.get("_refresh_lock") or threading.Lock()
     with lock:
-        data = get_items_status(g["CONFIG"])
+        data = get_items_status(_alert_config(g))
     state = _load_state(g)
     alerts, state = evaluate_ads(data["sellers"], state)
     _save_state(g, state)
@@ -229,7 +242,6 @@ def _check_ads(g):
 
 
 def _alerts_loop(get_globals):
-    last_money_check = 0.0
     ready_logged = False
 
     while True:
@@ -240,42 +252,29 @@ def _alerts_loop(get_globals):
                 time.sleep(5)  # основной модуль бота ещё загружается
                 continue
             if not ready_logged:
-                print("Alerts v42 ready", flush=True)
+                print("Alerts v43 ready", flush=True)
                 ready_logged = True
 
             tz = ZoneInfo(g["CONFIG"].get("timezone", "Europe/Moscow"))
             now = datetime.now(tz)
-            now_ts = time.time()
 
-            if now.weekday() >= 5:  # выходные: ничего не проверяем
-                time.sleep(60)
-                continue
-
-            if (MONEY_WINDOW[0] <= now.hour < MONEY_WINDOW[1]
-                    and now_ts - last_money_check >= MONEY_CHECK_INTERVAL):
-                last_money_check = now_ts
-                try:
-                    _check_money(g, now_ts)
-                except Exception as exc:
-                    print("ALERT MONEY CHECK ERROR:", exc, flush=True)
-
-            today = now.date().isoformat()
-            for slot in ADS_CHECK_TIMES:
-                hh, mm = [int(x) for x in slot.split(":", 1)]
-                slot_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if now.weekday() < 5 and now.hour in CHECK_HOURS:
+                slot_dt = now.replace(minute=CHECK_MINUTE, second=0, microsecond=0)
                 late = (now - slot_dt).total_seconds()
-                if not (0 <= late < ADS_SLOT_GRACE):
-                    continue
+                slot_id = slot_dt.strftime("%Y-%m-%d %H:%M")
                 state = _load_state(g)
-                done = state.setdefault("ads_slots", {})
-                if done.get(slot) == today:
-                    continue
-                done[slot] = today
-                _save_state(g, state)
-                try:
-                    _check_ads(g)
-                except Exception as exc:
-                    print("ALERT ADS CHECK ERROR:", exc, flush=True)
+                if 0 <= late < SLOT_GRACE and state.get("last_slot") != slot_id:
+                    state["last_slot"] = slot_id
+                    _save_state(g, state)
+                    print(f"Alerts slot {slot_id}", flush=True)
+                    try:
+                        _check_money(g, time.time())
+                    except Exception as exc:
+                        print("ALERT MONEY CHECK ERROR:", exc, flush=True)
+                    try:
+                        _check_ads(g)
+                    except Exception as exc:
+                        print("ALERT ADS CHECK ERROR:", exc, flush=True)
         except Exception as exc:
             print("ALERTS LOOP ERROR:", exc, flush=True)
 
@@ -287,5 +286,5 @@ def run_alerts(bot_globals):
     # передавать нельзя: вызванная здесь, она вернёт словарь alerts.py.
     if callable(bot_globals):
         raise TypeError("run_alerts ждёт словарь globals() из bot.py, а не функцию")
-    print("Alerts v42 started", flush=True)
+    print("Alerts v43 started", flush=True)
     _alerts_loop(lambda: bot_globals)
