@@ -30,11 +30,8 @@ FIXED_WEEKDAY_SCHEDULE = {
     "08:00": "full",
     "08:40": "finance",
     "10:00": "finance",
-    "11:00": "finance",
     "12:00": "finance",
-    "13:00": "finance",
     "14:00": "finance",
-    "15:00": "finance",
     "16:00": "finance",
 }
 DELETE_QUEUE_PATH = DATA_DIR / "message_delete_queue.json"

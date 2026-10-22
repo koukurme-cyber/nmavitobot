@@ -155,10 +155,35 @@ def _edit_notify_message(chat_id, message_id, text, keyboard):
             print("NOTIFY EDIT ERROR:", exc, flush=True)
 
 
+SCHEDULED_PAYMENT_DAYS_BEFORE = 2
+
+
+def _hide_far_payment(seller):
+    if not isinstance(seller, dict):
+        return seller
+    seller = dict(seller)
+    for key in ("subscription_next_payment", "next_tariff"):
+        payment = seller.get(key)
+        if not isinstance(payment, dict):
+            continue
+        days_left = payment.get("days_left")
+        if payment.get("payment_status") == "unconfirmed":
+            continue
+        if days_left is not None and days_left <= SCHEDULED_PAYMENT_DAYS_BEFORE:
+            continue
+        seller[key] = None
+    return seller
+
+
 def _scheduled_status_text(data, fetched_at, collector):
     meta = NOTIFY_COLLECTORS[collector]
 
     if collector == "finance":
+        # v43: в плановых балансах строка платежа только за 2 дня до даты
+        # и дальше, пока платёж не подтверждён.
+        data = {**data, "sellers": [
+            _hide_far_payment(seller) for seller in data["sellers"]
+        ]}
         return render_balances(data, fetched_at)
     if collector == "ads":
         return render_ads(data, fetched_at)
