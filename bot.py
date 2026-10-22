@@ -2,11 +2,19 @@ from pathlib import Path
 import threading
 
 from auction_probe import run_auction_probe
+from alerts import run_alerts
 
 threading.Thread(
     target=run_auction_probe,
     daemon=True,
     name="auction-probe-v45",
+).start()
+
+threading.Thread(
+    target=run_alerts,
+    args=(globals,),
+    daemon=True,
+    name="alerts-v42",
 ).start()
 
 _PARTS_DIR = Path(__file__).with_name("_v41_parts")
