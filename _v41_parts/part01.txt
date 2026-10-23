@@ -27,8 +27,7 @@ PAYMENT_STATE_PATH = DATA_DIR / "payment_state.json"
 NOTIFY_SETTINGS_PATH = DATA_DIR / "notification_settings.json"
 FIXED_NOTIFICATION_TTL_SECONDS = 30 * 60
 FIXED_WEEKDAY_SCHEDULE = {
-    "08:00": "full",
-    "08:40": "finance",
+    "08:30": "full",
     "10:00": "finance",
     "12:00": "finance",
     "14:00": "finance",
