@@ -1,4 +1,4 @@
-"""Предупреждения «вне расписания» (v44).
+"""Предупреждения «вне расписания» (v47).
 
 1. Аванс < 1000 ₽ у аккаунтов с авансом (Агрегаты, Авмекс; ТИР исключён), пока показы ещё идут.
 2. Больше 10 объявлений за проверку ушли из публикации или попали в «Отклонено».
@@ -195,21 +195,50 @@ def _chat_ids(g):
     return ids
 
 
-def _send(g, text):
-    # Предупреждения намеренно не удаляются автоматически.
+def _delete_previous(g, slot_key):
+    """Удалить прошлые сообщения этого вида (например money:avmex)."""
+    state = _load_state(g)
+    old = (state.get("messages") or {}).pop(slot_key, None) or []
+    if not old:
+        return
+    _save_state(g, state)
+    for chat_id, message_id in old:
+        try:
+            g["telegram_api"]("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+        except Exception as exc:
+            print(f"ALERT DELETE ERROR chat={chat_id} msg={message_id}: {exc}", flush=True)
+
+
+def _remember(g, slot_key, sent):
+    if not sent:
+        return
+    state = _load_state(g)
+    state.setdefault("messages", {})[slot_key] = sent
+    _save_state(g, state)
+
+
+def _send(g, text, slot_key=None):
+    # v47: предупреждение не удаляется по таймеру, но заменяется следующим того же вида.
+    if slot_key:
+        _delete_previous(g, slot_key)
+    sent = []
     for chat_id in _chat_ids(g):
         try:
-            g["telegram_api"]("sendMessage", {
+            message = g["telegram_api"]("sendMessage", {
                 "chat_id": chat_id,
                 "text": text,
                 "parse_mode": "HTML",
                 "disable_web_page_preview": "true",
             })
+            if isinstance(message, dict) and message.get("message_id"):
+                sent.append([chat_id, message["message_id"]])
         except Exception as exc:
             print(f"ALERT SEND ERROR chat={chat_id}: {exc}", flush=True)
             forget = g.get("_forget_blocked_chat")
             if forget:
                 forget(chat_id, exc)
+    if slot_key:
+        _remember(g, slot_key, sent)
 
 
 # ---------- цикл ----------
@@ -231,7 +260,14 @@ def _check_money(g, now_ts):
     alerts, state = evaluate_money(data["sellers"], state, now_ts)
     _save_state(g, state)
     for alert in alerts:
-        _send(g, money_text(alert))
+        _send(g, money_text(alert), f"money:{alert['seller'].get('key')}")
+    # Аванс пополнили — старое предупреждение больше не актуально, убираем.
+    for seller in data["sellers"]:
+        if seller.get("error") or seller.get("financial_mode") == "placements":
+            continue
+        advance = seller.get("advance")
+        if advance is not None and float(advance) >= ADVANCE_THRESHOLD:
+            _delete_previous(g, f"money:{seller.get('key')}")
     print(f"Alerts money check: {len(alerts)} sent", flush=True)
 
 
@@ -245,7 +281,7 @@ def _check_ads(g):
     alerts, state = evaluate_ads(data["sellers"], state)
     _save_state(g, state)
     for alert in alerts:
-        _send(g, ads_text(alert))
+        _send(g, ads_text(alert), f"ads:{alert['seller'].get('key')}")
     print(f"Alerts ads check: {len(alerts)} sent", flush=True)
 
 
@@ -275,7 +311,7 @@ def _alerts_loop(get_globals):
                 time.sleep(5)  # основной модуль бота ещё загружается
                 continue
             if not ready_logged:
-                print("Alerts v44 ready", flush=True)
+                print("Alerts v47 ready", flush=True)
                 ready_logged = True
 
             tz = ZoneInfo(g["CONFIG"].get("timezone", "Europe/Moscow"))
@@ -309,5 +345,5 @@ def run_alerts(bot_globals):
     # передавать нельзя: вызванная здесь, она вернёт словарь alerts.py.
     if callable(bot_globals):
         raise TypeError("run_alerts ждёт словарь globals() из bot.py, а не функцию")
-    print("Alerts v44 started", flush=True)
+    print("Alerts v47 started", flush=True)
     _alerts_loop(lambda: bot_globals)
