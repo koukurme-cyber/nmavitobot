@@ -15,6 +15,8 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from published_history import published_text
+
 ADVANCE_THRESHOLD = 1000          # ₽, строго меньше -> тревога
 ADS_CHANGE_THRESHOLD = 10         # строго больше -> тревога
 
@@ -140,7 +142,7 @@ def money_text(alert):
 
 def ads_text(alert):
     lines = [f"⚠️ <b>Объявления выпадают из публикации</b>", _name(alert["seller"])]
-    lines.append(f"Опубликовано сейчас: {_fmt(alert['published'])}")
+    lines.append(published_text((alert["seller"].get("ads") or {})))
     parts = [
         ("Вышло из публикации", max(alert["dropped"], 0)),
         ("Новых отклонённых", alert["rejected_up"]),
