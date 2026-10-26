@@ -1,4 +1,4 @@
-"""Предупреждения «вне расписания» (v47).
+"""Предупреждения «вне расписания» (v48).
 
 1. Аванс < 1000 ₽ у аккаунтов с авансом (Агрегаты, Авмекс; ТИР исключён), пока показы ещё идут.
 2. Больше 10 объявлений за проверку ушли из публикации или попали в «Отклонено».
@@ -111,6 +111,7 @@ def evaluate_ads(sellers, state):
             alerts.append({
                 "seller": seller,
                 "published": cur["published"],
+                "rejected": cur["rejected"],
                 "dropped": dropped,
                 "rejected_up": rejected_up,
                 "blocked_up": delta("blocked") or 0,
@@ -281,8 +282,49 @@ def _check_ads(g):
     alerts, state = evaluate_ads(data["sellers"], state)
     _save_state(g, state)
     for alert in alerts:
-        _send(g, ads_text(alert), f"ads:{alert['seller'].get('key')}")
+        key = alert["seller"].get("key")
+        _send(g, ads_text(alert), f"ads:{key}")
+        _remember_ads_level(g, key, alert)
+    _clear_recovered_ads(g, data["sellers"])
     print(f"Alerts ads check: {len(alerts)} sent", flush=True)
+
+
+def _remember_ads_level(g, key, alert):
+    """Запомнить уровень «до падения»: когда вернётся к нему — предупреждение уберём."""
+    published_min = alert["published"] + max(alert["dropped"], 0) - ADS_CHANGE_THRESHOLD
+    rejected_max = alert["rejected"] - max(alert["rejected_up"], 0) + ADS_CHANGE_THRESHOLD
+    state = _load_state(g)
+    levels = state.setdefault("ads_levels", {})
+    old = levels.get(key)
+    if old:  # падение продолжилось — ориентируемся на самый первый уровень
+        published_min = max(published_min, old["published_min"])
+        rejected_max = min(rejected_max, old["rejected_max"])
+    levels[key] = {"published_min": published_min, "rejected_max": rejected_max}
+    _save_state(g, state)
+
+
+def ads_recovered(level, stats):
+    published = _num(stats.get("published"))
+    rejected = _num(stats.get("rejected"))
+    if published is None or rejected is None:
+        return False
+    return published >= level["published_min"] and rejected <= level["rejected_max"]
+
+
+def _clear_recovered_ads(g, sellers):
+    state = _load_state(g)
+    levels = state.get("ads_levels") or {}
+    for seller in sellers:
+        key = seller.get("key")
+        level = levels.get(key)
+        if not level or seller.get("error"):
+            continue
+        if ads_recovered(level, seller.get("ads") or {}):
+            _delete_previous(g, f"ads:{key}")
+            state = _load_state(g)
+            state.get("ads_levels", {}).pop(key, None)
+            _save_state(g, state)
+            print(f"Alerts ads recovered: {key}", flush=True)
 
 
 def _due_slot(g, now, slot_dt, state_key):
@@ -311,7 +353,7 @@ def _alerts_loop(get_globals):
                 time.sleep(5)  # основной модуль бота ещё загружается
                 continue
             if not ready_logged:
-                print("Alerts v47 ready", flush=True)
+                print("Alerts v48 ready", flush=True)
                 ready_logged = True
 
             tz = ZoneInfo(g["CONFIG"].get("timezone", "Europe/Moscow"))
@@ -345,5 +387,5 @@ def run_alerts(bot_globals):
     # передавать нельзя: вызванная здесь, она вернёт словарь alerts.py.
     if callable(bot_globals):
         raise TypeError("run_alerts ждёт словарь globals() из bot.py, а не функцию")
-    print("Alerts v47 started", flush=True)
+    print("Alerts v48 started", flush=True)
     _alerts_loop(lambda: bot_globals)
