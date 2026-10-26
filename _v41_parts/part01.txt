@@ -12,6 +12,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from avito_provider import get_financial_status, get_items_status, get_status
+from published_history import published_text
 
 try:
     sys.stdout.reconfigure(line_buffering=True)

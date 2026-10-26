@@ -8,6 +8,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from published_history import record as record_published
+
 BASE_URL = "https://api.avito.ru"
 
 _token_cache = {}
@@ -653,6 +655,10 @@ def add_seller_items(result, seller_config):
             "removed": counts["removed"],
             "old": counts["old"],
         }
+        try:
+            result["ads"]["published_ref"] = record_published(key, counts["active"])
+        except Exception as exc:
+            print(f"PUBLISHED HISTORY ERROR {key}: {exc}", flush=True)
     except Exception as exc:
         result["warnings"].append(f"объявления: {exc}")
     finally:

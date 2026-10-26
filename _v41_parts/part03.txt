@@ -51,7 +51,7 @@ def _seller_full_block(seller):
         lines.append(f"Аванс: {money(seller.get('advance'))}")
 
     lines.extend([
-        f"Опубликовано: {plain_number(stats.get('published'))}",
+        published_text(stats),
         f"Отклонено: {plain_number(stats.get('rejected'))}",
         f"Заблокировано: {plain_number(stats.get('blocked'))}",
         f"Снято: {plain_number(stats.get('removed'))}",
@@ -104,7 +104,7 @@ def _seller_ads_block(seller):
     stats = seller.get("ads") or {}
     return "\n".join([
         f"<b>{name}</b>",
-        f"Опубликовано: {plain_number(stats.get('published'))}",
+        published_text(stats),
         f"Отклонено: {plain_number(stats.get('rejected'))}",
         f"Заблокировано: {plain_number(stats.get('blocked'))}",
         f"Снято: {plain_number(stats.get('removed'))}",
