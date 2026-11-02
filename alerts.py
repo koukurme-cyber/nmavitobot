@@ -1,4 +1,4 @@
-"""Предупреждения «вне расписания» (v48).
+"""Предупреждения «вне расписания» (v49).
 
 1. Аванс < 1000 ₽ у аккаунтов с авансом (Агрегаты, Авмекс; ТИР исключён), пока показы ещё идут.
 2. Больше 10 объявлений за проверку ушли из публикации или попали в «Отклонено».
@@ -29,6 +29,7 @@ MONEY_MINUTE = 10
 MONEY_HOURS = range(9, 16)   # окно уведомлений 08:30–16:00
 ADS_CHECK_TIMES = ("09:30", "14:30")
 SLOT_GRACE = 10 * 60              # допустимое опоздание слота (рестарт бота)
+CLEANUP_TIME = "16:00"            # v49: в конце дня удаляем все предупреждения (лимит Telegram — 48 ч)
 
 EXCLUDED_SELLERS = {"tir"}        # по ТИР предупреждения не нужны
 
@@ -327,6 +328,20 @@ def _clear_recovered_ads(g, sellers):
             print(f"Alerts ads recovered: {key}", flush=True)
 
 
+def _cleanup_all(g):
+    """Удалить все висящие предупреждения, пока Telegram ещё разрешает (48 ч).
+    Если проблема осталась, утренние проверки пришлют свежее предупреждение."""
+    state = _load_state(g)
+    keys = list((state.get("messages") or {}).keys())
+    for slot_key in keys:
+        _delete_previous(g, slot_key)
+    # Предупреждение по объявлениям удалено — следить за его восстановлением незачем.
+    state = _load_state(g)
+    state["ads_levels"] = {}
+    _save_state(g, state)
+    print(f"Alerts cleanup: {len(keys)} removed", flush=True)
+
+
 def _due_slot(g, now, slot_dt, state_key):
     """True, если слот наступил (с допуском) и ещё не отработан. Отмечает его."""
     late = (now - slot_dt).total_seconds()
@@ -353,7 +368,7 @@ def _alerts_loop(get_globals):
                 time.sleep(5)  # основной модуль бота ещё загружается
                 continue
             if not ready_logged:
-                print("Alerts v48 ready", flush=True)
+                print("Alerts v49 ready", flush=True)
                 ready_logged = True
 
             tz = ZoneInfo(g["CONFIG"].get("timezone", "Europe/Moscow"))
@@ -376,6 +391,14 @@ def _alerts_loop(get_globals):
                             _check_ads(g)
                         except Exception as exc:
                             print("ALERT ADS CHECK ERROR:", exc, flush=True)
+
+                hh, mm = [int(x) for x in CLEANUP_TIME.split(":", 1)]
+                slot = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                if _due_slot(g, now, slot, "last_cleanup_slot"):
+                    try:
+                        _cleanup_all(g)
+                    except Exception as exc:
+                        print("ALERT CLEANUP ERROR:", exc, flush=True)
         except Exception as exc:
             print("ALERTS LOOP ERROR:", exc, flush=True)
 
@@ -387,5 +410,5 @@ def run_alerts(bot_globals):
     # передавать нельзя: вызванная здесь, она вернёт словарь alerts.py.
     if callable(bot_globals):
         raise TypeError("run_alerts ждёт словарь globals() из bot.py, а не функцию")
-    print("Alerts v48 started", flush=True)
+    print("Alerts v49 started", flush=True)
     _alerts_loop(lambda: bot_globals)
